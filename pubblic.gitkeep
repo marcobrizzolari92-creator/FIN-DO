@@ -1,0 +1,1377 @@
+<!DOCTYPE html><html lang="it" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#7c3aed">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="description" content="FINDO — Cerca, confronta e trova qualsiasi cosa">
+<title>FINDO</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192x192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512x512.png">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root,[data-theme="dark"]{--bg:#0f0b1a;--bg2:#1a1528;--card:#1e1833;--card-hover:#282045;--pri:#7c3aed;--pri2:#a78bfa;--acc:#06b6d4;--acc2:#22d3ee;--ok:#10b981;--warn:#f59e0b;--err:#ef4444;--text:#f3f0ff;--text2:#c4b5fd;--text3:#8b7fb0;--muted:#6b6580;--border:#2d2644;--glass:rgba(126,58,237,0.08);--glass2:rgba(126,58,237,0.04);--sh:0 2px 16px rgba(0,0,0,.35);--r:16px;--r2:12px;--r3:8px;--t:.22s cubic-bezier(.4,0,.2,1);--max:860px}
+[data-theme="light"]{--bg:#f8f7fc;--bg2:#eeeef6;--card:#fff;--card-hover:#f3f0ff;--pri:#7c3aed;--pri2:#6d28d9;--acc:#0891b2;--acc2:#0e7490;--ok:#059669;--warn:#d97706;--err:#dc2626;--text:#1a1033;--text2:#4c3d6e;--text3:#7c6f9a;--muted:#9a93a8;--border:#e0daee;--glass:rgba(124,58,237,0.05);--glass2:rgba(124,58,237,0.02);--sh:0 2px 16px rgba(0,0,0,.06)}
+html{font-size:16px;-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100dvh;overflow-x:hidden;-webkit-tap-highlight-color:transparent}
+a{color:var(--acc);text-decoration:none}
+button{font:inherit;cursor:pointer;border:none;background:none;color:inherit}
+input,select,textarea{font:inherit;color:inherit}
+::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+/* === SHELL === */
+.shell{max-width:var(--max);margin:0 auto;padding:0 16px}
+
+/* === SEARCH BAR === */
+.search-wrap{position:sticky;top:0;z-index:100;padding:12px 0 8px;background:linear-gradient(var(--bg) 60%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.search-box{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:6px 8px 6px 16px;box-shadow:var(--sh);transition:border var(--t),box-shadow var(--t)}
+.search-box:focus-within{border-color:var(--pri);box-shadow:0 0 0 3px rgba(124,58,237,.18)}
+.search-box input{flex:1;min-width:0;padding:8px 0;background:transparent;border:none;outline:none;font-size:1rem;color:var(--text)}
+.search-box input::placeholder{color:var(--muted)}
+.search-btn{width:40px;height:40px;border-radius:var(--r3);background:var(--pri);color:#fff;display:flex;align-items:center;justify-content:center;font-size:1.2rem;transition:background var(--t)}
+.search-btn:hover,.search-btn:active{background:var(--pri2)}
+.voice-btn{width:36px;height:36px;border-radius:50%;background:transparent;color:var(--text2);display:flex;align-items:center;justify-content:center;font-size:1.1rem;transition:all var(--t)}
+.voice-btn:hover{background:var(--glass);color:var(--acc)}
+.voice-btn.listening{color:var(--err);animation:pulse-mic 1s infinite}
+@keyframes pulse-mic{0%,100%{transform:scale(1)}50%{transform:scale(1.15)}}
+.camera-btn{width:36px;height:36px;border-radius:50%;background:transparent;color:var(--text2);display:flex;align-items:center;justify-content:center;font-size:1.1rem;transition:all var(--t)}
+.camera-btn:hover{background:var(--glass);color:var(--acc)}
+
+/* === INTENT BAR === */
+.intent-bar{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px;align-items:center}
+.intent-tag{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;font-size:.75rem;font-weight:600;background:var(--glass);color:var(--pri2);border:1px solid rgba(124,58,237,.15)}
+.intent-tag.kind{background:rgba(6,182,212,.08);color:var(--acc2);border-color:rgba(6,182,212,.15)}
+.intent-tag.warn{background:rgba(245,158,11,.08);color:var(--warn);border-color:rgba(245,158,11,.15)}
+.intent-tag.ok{background:rgba(16,185,129,.08);color:var(--ok);border-color:rgba(16,185,129,.15)}
+
+/* === AI ANSWER === */
+.ai-answer{margin:12px 0 4px;padding:16px 18px;background:linear-gradient(135deg,rgba(124,58,237,.08),rgba(6,182,212,.06));border:1px solid rgba(124,58,237,.12);border-radius:var(--r2);font-size:.92rem;line-height:1.55;color:var(--text2)}
+.ai-answer .ai-label{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--acc);margin-bottom:6px}
+
+/* === FILTERS === */
+.filters{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.filter-btn{padding:6px 14px;border-radius:20px;font-size:.78rem;font-weight:600;background:var(--card);color:var(--text3);border:1px solid var(--border);transition:all var(--t)}
+.filter-btn:hover,.filter-btn.on{background:var(--pri);color:#fff;border-color:var(--pri)}
+
+/* === RESULTS === */
+.results-area{margin:8px 0 32px}
+.result-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r2);padding:16px;margin-bottom:10px;transition:all var(--t);position:relative}
+.result-card:hover{border-color:rgba(124,58,237,.25);box-shadow:0 4px 20px rgba(0,0,0,.15)}
+.result-title{font-size:.95rem;font-weight:700;color:var(--text);margin-bottom:4px;display:flex;align-items:center;gap:8px}
+.result-title a{color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.result-title a:hover{color:var(--acc)}
+.result-desc{font-size:.82rem;color:var(--text3);line-height:1.45;margin-bottom:8px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.result-meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:.75rem}
+.result-meta .price{font-weight:800;color:var(--ok);font-size:.9rem}
+.result-meta .rating{color:var(--warn)}
+.result-meta .source{padding:2px 8px;border-radius:10px;background:var(--glass);color:var(--pri2);font-weight:600}
+.result-meta .dist{color:var(--acc)}
+.result-meta .open{color:var(--ok);font-weight:700}
+.result-meta .closed{color:var(--err);font-weight:700}
+.result-meta .vehicle{color:var(--text3);font-size:.72rem}
+.result-why{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
+.result-why span{padding:2px 8px;border-radius:8px;font-size:.68rem;font-weight:600;background:var(--glass2);color:var(--text3)}
+.result-image{width:100%;max-height:180px;object-fit:cover;border-radius:var(--r3);margin:8px 0}
+.result-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.result-actions button,.result-actions a{padding:5px 12px;border-radius:var(--r3);font-size:.72rem;font-weight:600;transition:all var(--t);display:flex;align-items:center;gap:4px}
+.btn-alert{background:rgba(245,158,11,.08);color:var(--warn);border:1px solid rgba(245,158,11,.15)}
+.btn-alert:hover,.btn-alert.on{background:var(--warn);color:#fff}
+.btn-compare{background:rgba(124,58,237,.08);color:var(--pri2);border:1px solid rgba(124,58,237,.15)}
+.btn-compare:hover,.btn-compare.on{background:var(--pri);color:#fff}
+.btn-share{background:rgba(6,182,212,.08);color:var(--acc);border:1px solid rgba(6,182,212,.15)}
+.btn-share:hover{background:var(--acc);color:#fff}
+.btn-buy{background:var(--ok);color:#fff;font-weight:700;padding:5px 16px}
+.btn-buy:hover{opacity:.9}
+.btn-history{background:var(--glass);color:var(--text3);border:1px solid var(--border)}
+.btn-history:hover{background:var(--glass2);color:var(--text2)}
+.btn-fav{color:var(--muted);font-size:1rem}
+.btn-fav.on{color:var(--err)}
+
+/* === PRICE HISTORY MINI CHART === */
+.price-history-chart{margin-top:8px;padding:8px 0}
+.price-history-chart .chart-label{font-size:.68rem;color:var(--text3);margin-bottom:4px}
+.price-history-chart svg{width:100%;height:40px}
+
+/* === COMPARE MODAL === */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;display:none;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+.modal-overlay.show{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:20px;max-width:720px;width:92%;max-height:80vh;overflow-y:auto;box-shadow:var(--sh)}
+.modal h2{font-size:1.1rem;margin-bottom:12px;color:var(--pri2)}
+.compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:480px){.compare-grid{grid-template-columns:1fr}}
+.compare-col{padding:12px;border-radius:var(--r3);background:var(--bg2);border:1px solid var(--border)}
+.compare-col .c-title{font-size:.9rem;font-weight:700;margin-bottom:8px;color:var(--text)}
+.compare-row{display:flex;justify-content:space-between;padding:4px 0;font-size:.78rem;border-bottom:1px solid var(--border)}
+.compare-row:last-child{border:none}
+.compare-row .c-label{color:var(--text3)}
+.compare-row .c-val{color:var(--text);font-weight:600}
+.compare-row .c-best{color:var(--ok);font-weight:700}
+.compare-row .c-worse{color:var(--err)}
+
+/* === SAVED SEARCHES PANEL === */
+.saved-panel{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:150;display:none;backdrop-filter:blur(3px)}
+.saved-panel.show{display:block}
+.saved-drawer{position:fixed;right:0;top:0;bottom:0;width:min(380px,85vw);background:var(--bg2);border-left:1px solid var(--border);padding:20px;overflow-y:auto;transform:translateX(100%);transition:transform .3s ease}
+.saved-panel.show .saved-drawer{transform:translateX(0)}
+.saved-drawer h3{font-size:1rem;color:var(--pri2);margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.saved-item{padding:10px;border-radius:var(--r3);background:var(--card);border:1px solid var(--border);margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
+.saved-item .si-query{font-size:.85rem;font-weight:600;color:var(--text)}
+.saved-item .si-meta{font-size:.7rem;color:var(--text3)}
+.saved-item .si-actions{display:flex;gap:6px}
+.saved-item button{font-size:.72rem;padding:3px 8px;border-radius:6px}
+
+/* === VOICE OVERLAY === */
+.voice-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:300;display:none;align-items:center;justify-content:center;flex-direction:column}
+.voice-overlay.show{display:flex}
+.voice-overlay .mic-anim{width:80px;height:80px;border-radius:50%;background:var(--err);animation:voice-pulse 1.2s infinite;margin-bottom:16px;display:flex;align-items:center;justify-content:center;font-size:2rem;color:#fff}
+@keyframes voice-pulse{0%,100%{transform:scale(1);box-shadow:0 0 0 0 rgba(239,68,68,.4)}50%{transform:scale(1.08);box-shadow:0 0 0 20px rgba(239,68,68,0)}}
+.voice-overlay .voice-text{font-size:1rem;color:#fff;text-align:center;max-width:300px}
+.voice-overlay .voice-close{margin-top:20px;padding:8px 24px;border-radius:var(--r3);background:var(--card);color:var(--text)}
+
+/* === BARCODE SCANNER === */
+.scanner-overlay{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:300;display:none;flex-direction:column;align-items:center;justify-content:center}
+.scanner-overlay.show{display:flex}
+.scanner-overlay .scanner-video-wrap{position:relative;width:90%;max-width:400px;aspect-ratio:4/3;border-radius:var(--r2);overflow:hidden;border:2px solid var(--acc);box-shadow:0 0 30px rgba(6,182,212,.2)}
+.scanner-overlay video{width:100%;height:100%;object-fit:cover;border-radius:var(--r2)}
+.scanner-overlay .scanner-crosshair{position:absolute;inset:15%;border:2px solid rgba(6,182,212,.5);border-radius:var(--r3);pointer-events:none}
+.scanner-overlay .scanner-line{position:absolute;left:5%;width:90%;height:2px;background:linear-gradient(90deg,transparent,var(--acc),transparent);animation:scan-line 2s ease-in-out infinite;pointer-events:none}
+@keyframes scan-line{0%{top:15%}50%{top:82%}100%{top:15%}}
+.scanner-overlay .scanner-badge{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);padding:4px 12px;border-radius:20px;background:rgba(0,0,0,.6);color:var(--acc);font-size:.7rem;font-weight:600;backdrop-filter:blur(6px)}
+.scanner-overlay .scanner-hint{color:var(--text3);font-size:.82rem;text-align:center;margin-top:12px}
+.scanner-overlay .scanner-detected{color:var(--ok);font-size:.88rem;text-align:center;margin-top:8px;font-weight:700;min-height:1.2em}
+.scanner-overlay .scanner-close{margin-top:10px;padding:8px 24px;border-radius:var(--r3);background:var(--card);color:var(--text);border:1px solid var(--border)}
+.scanner-manual-input{display:flex;gap:8px;margin-top:10px;width:90%;max-width:400px}
+.scanner-manual-input input{flex:1;padding:8px 12px;border-radius:var(--r3);background:var(--bg2);border:1px solid var(--border);color:var(--text);font-size:.9rem}
+.scanner-manual-input button{padding:8px 16px;border-radius:var(--r3);background:var(--pri);color:#fff;font-weight:600}
+.scanner-overlay .scanner-flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .1s;z-index:301}
+.scanner-overlay .scanner-flash.on{opacity:.6}
+
+/* === SHARE MODAL === */
+.share-box{padding:16px}
+.share-box h3{font-size:.95rem;margin-bottom:12px;color:var(--pri2)}
+.share-links{display:flex;gap:10px;flex-wrap:wrap}
+.share-links a{padding:8px 16px;border-radius:var(--r3);font-size:.78rem;font-weight:600;background:var(--glass);color:var(--pri2);border:1px solid var(--border);transition:all var(--t)}
+.share-links a:hover{background:var(--pri);color:#fff}
+
+/* === FAB BUTTONS === */
+.fab-group{position:fixed;bottom:20px;right:16px;display:flex;flex-direction:column;gap:8px;z-index:90}
+.fab{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.2rem;box-shadow:var(--sh);transition:all var(--t)}
+.fab:hover{transform:scale(1.1)}
+.fab-saved{background:var(--pri);color:#fff}
+.fab-compare{background:var(--acc);color:#fff}
+.fab-top{background:var(--card);color:var(--text3);border:1px solid var(--border);opacity:0;pointer-events:none;transition:opacity var(--t)}
+.fab-top.show{opacity:1;pointer-events:auto}
+
+/* === EMPTY / LOADING === */
+.loading{display:flex;align-items:center;gap:8px;padding:24px;color:var(--text3);font-size:.88rem}
+.loading .dots::after{content:'';animation:dots 1.5s infinite}
+@keyframes dots{0%{content:''}33%{content:'.'}66%{content:'..'}100%{content:'...'}}
+.empty{padding:40px 20px;text-align:center;color:var(--text3)}
+.empty .e-icon{font-size:3rem;margin-bottom:8px}
+.empty .e-title{font-size:1.1rem;font-weight:700;color:var(--text2);margin-bottom:4px}
+.empty .e-sub{font-size:.82rem}
+
+/* === HEADERS === */
+.header{display:flex;align-items:center;justify-content:space-between;padding:16px 0 4px}
+.header .logo{font-size:1.5rem;font-weight:900;background:linear-gradient(135deg,var(--pri),var(--acc));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.header .hdr-btns{display:flex;gap:8px}
+.header .hdr-btn{width:36px;height:36px;border-radius:50%;background:var(--card);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:.9rem;color:var(--text3);transition:all var(--t)}
+.header .hdr-btn:hover{color:var(--pri2);border-color:var(--pri)}
+
+/* === TAB BAR === */
+.tab-bar{display:flex;gap:0;background:var(--card);border-radius:var(--r3);border:1px solid var(--border);margin:8px 0;overflow:hidden}
+.tab-bar button{flex:1;padding:8px 0;font-size:.78rem;font-weight:600;color:var(--text3);background:transparent;transition:all var(--t);border-right:1px solid var(--border)}
+.tab-bar button:last-child{border-right:none}
+.tab-bar button.on{background:var(--pri);color:#fff}
+
+/* === HISTORY / FAVS === */
+.history-item,.fav-item{padding:10px 12px;border-radius:var(--r3);background:var(--card);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:all var(--t)}
+.history-item:hover,.fav-item:hover{border-color:var(--pri)}
+.hi-text{font-size:.85rem;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.hi-time{font-size:.68rem;color:var(--muted);margin-left:8px;white-space:nowrap}
+.hi-del{font-size:.9rem;color:var(--muted);margin-left:8px}
+
+/* === VISUAL SEARCH === */
+.visual-upload{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:300;display:none;align-items:center;justify-content:center}
+.visual-upload.show{display:flex}
+.visual-box{background:var(--card);border-radius:var(--r);padding:24px;text-align:center;max-width:440px;width:92%}
+.visual-box h3{color:var(--pri2);margin-bottom:12px;font-size:1rem}
+.visual-box input[type=file]{display:none}
+.visual-box .vis-cam-wrap{position:relative;width:100%;aspect-ratio:4/3;border-radius:var(--r2);overflow:hidden;border:2px solid var(--border);margin-bottom:12px;display:none;background:#000}
+.visual-box .vis-cam-wrap.on{display:block}
+.visual-box .vis-cam-wrap video{width:100%;height:100%;object-fit:cover}
+.visual-box .vis-cam-wrap .vis-snap-btn{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);width:56px;height:56px;border-radius:50%;background:rgba(124,58,237,.9);color:#fff;font-size:1.4rem;display:flex;align-items:center;justify-content:center;box-shadow:0 0 16px rgba(124,58,237,.4);border:3px solid #fff;cursor:pointer}
+.visual-box .vis-cam-wrap .vis-switch-btn{position:absolute;top:8px;right:8px;width:32px;height:32px;border-radius:50%;background:rgba(0,0,0,.5);color:#fff;font-size:.9rem;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.visual-box .vis-mode-bar{display:flex;gap:8px;margin-bottom:12px}
+.visual-box .vis-mode-btn{flex:1;padding:10px;border-radius:var(--r3);background:var(--bg2);border:1px solid var(--border);color:var(--text3);font-size:.82rem;font-weight:600;transition:all var(--t)}
+.visual-box .vis-mode-btn.on{background:var(--pri);color:#fff;border-color:var(--pri)}
+.visual-box .upload-area{border:2px dashed var(--border);border-radius:var(--r3);padding:32px;color:var(--text3);font-size:.88rem;cursor:pointer;transition:border var(--t)}
+.visual-box .upload-area:hover{border-color:var(--pri)}
+.visual-box .preview-img{max-width:100%;max-height:200px;border-radius:var(--r3);margin:12px 0}
+.visual-box .vis-desc-input{width:100%;padding:10px 14px;border-radius:var(--r3);background:var(--bg2);border:1px solid var(--border);color:var(--text);font-size:.9rem;margin-bottom:8px}
+.visual-box .vis-desc-input::placeholder{color:var(--muted)}
+.visual-box .search-vis-btn{margin-top:4px;padding:10px 24px;border-radius:var(--r3);background:var(--pri);color:#fff;font-weight:700;width:100%}
+
+/* === TOASTS === */
+.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 20px;border-radius:var(--r3);background:var(--card);border:1px solid var(--border);color:var(--text);font-size:.82rem;z-index:500;opacity:0;transition:opacity .3s;pointer-events:none;box-shadow:var(--sh)}
+.toast.show{opacity:1}
+.toast.toast-ok{border-color:var(--ok);color:var(--ok)}
+.toast.toast-warn{border-color:var(--warn);color:var(--warn)}
+.toast.toast-err{border-color:var(--err);color:var(--err)}
+
+/* === RESPONSIVE === */
+@media(max-width:480px){
+  .search-box{padding:5px 6px 5px 12px}
+  .result-card{padding:12px}
+  .compare-grid{grid-template-columns:1fr}
+  .modal{width:96%;padding:14px}
+}
+</style>
+</head>
+<body>
+
+<div class="shell" id="app">
+  <!-- HEADER -->
+  <div class="header">
+    <div class="logo">FINDO</div>
+    <div class="hdr-btns">
+      <button class="hdr-btn" id="btnLang" title="Lingua">🌐</button>
+      <button class="hdr-btn" id="btnTheme" title="Tema">🌓</button>
+    </div>
+  </div>
+
+  <!-- SEARCH BAR -->
+  <div class="search-wrap">
+    <div class="search-box">
+      <input id="searchInput" type="text" placeholder="Cerca qualsiasi cosa..." autocomplete="off" enterkeyhint="search">
+      <button class="camera-btn" id="btnCamera" title="Scansiona barcode">📷</button>
+      <button class="camera-btn" id="btnVisual" title="Ricerca visiva" style="font-size:1rem">🖼️</button>
+      <button class="voice-btn" id="btnVoice" title="Ricerca vocale">🎤</button>
+      <button class="search-btn" id="btnSearch" title="Cerca">🔍</button>
+    </div>
+    <div class="intent-bar" id="intentBar"></div>
+    <div class="filters" id="filters"></div>
+  </div>
+
+  <!-- AI ANSWER -->
+  <div class="ai-answer" id="aiAnswer" style="display:none">
+    <div class="ai-label">✨ Risposta AI</div>
+    <div id="aiText"></div>
+  </div>
+
+  <!-- TAB BAR -->
+  <div class="tab-bar" id="tabBar">
+    <button class="on" data-tab="results">Risultati</button>
+    <button data-tab="favorites">Preferiti</button>
+    <button data-tab="history">Cronologia</button>
+  </div>
+
+  <!-- RESULTS -->
+  <div class="results-area" id="resultsArea">
+    <div class="empty" id="emptyState">
+      <div class="e-icon">🔍</div>
+      <div class="e-title">Cerca qualsiasi cosa</div>
+      <div class="e-sub">Auto, prodotti, hotel, ristoranti, voli e molto altro</div>
+    </div>
+  </div>
+
+  <!-- FAVORITES -->
+  <div class="results-area" id="favoritesArea" style="display:none">
+    <div class="empty" id="favEmpty">
+      <div class="e-icon">⭐</div>
+      <div class="e-title">Nessun preferito</div>
+      <div class="e-sub">Salva i risultati migliori</div>
+    </div>
+  </div>
+
+  <!-- HISTORY -->
+  <div class="results-area" id="historyArea" style="display:none">
+    <div class="empty" id="histEmpty">
+      <div class="e-icon">🕐</div>
+      <div class="e-title">Nessuna cronologia</div>
+      <div class="e-sub">Le tue ricerche appariranno qui</div>
+    </div>
+  </div>
+</div>
+
+<!-- COMPARE MODAL -->
+<div class="modal-overlay" id="compareModal">
+  <div class="modal">
+    <h2>⚖️ Confronto</h2>
+    <div class="compare-grid" id="compareGrid"></div>
+    <div style="text-align:right;margin-top:12px">
+      <button onclick="closeCompare()" style="padding:6px 16px;border-radius:8px;background:var(--glass);color:var(--text3);font-size:.78rem">Chiudi</button>
+      <button onclick="shareCompare()" style="padding:6px 16px;border-radius:8px;background:var(--acc);color:#fff;font-size:.78rem;margin-left:6px;font-weight:600">Condividi</button>
+    </div>
+  </div>
+</div>
+
+<!-- SAVED SEARCHES PANEL -->
+<div class="saved-panel" id="savedPanel" onclick="if(event.target===this)closeSaved()">
+  <div class="saved-drawer">
+    <h3>💾 Ricerche salvate</h3>
+    <div id="savedList"></div>
+  </div>
+</div>
+
+<!-- VOICE OVERLAY -->
+<div class="voice-overlay" id="voiceOverlay">
+  <div class="mic-anim">🎤</div>
+  <div class="voice-text" id="voiceText">Ascoltando...</div>
+  <button class="voice-close" onclick="stopVoice()">Annulla</button>
+</div>
+
+<!-- BARCODE SCANNER -->
+<div class="scanner-overlay" id="scannerOverlay">
+  <div class="scanner-video-wrap">
+    <video id="scannerVideo" autoplay playsinline muted></video>
+    <div class="scanner-crosshair"></div>
+    <div class="scanner-line"></div>
+    <div class="scanner-badge" id="scannerBadge">Inquadra un codice a barre</div>
+  </div>
+  <div class="scanner-detected" id="scannerDetected"></div>
+  <div class="scanner-hint">Il codice verrà rilevato automaticamente</div>
+  <div class="scanner-manual-input">
+    <input id="barcodeInput" placeholder="Inserisci codice manualmente" type="text">
+    <button onclick="searchBarcode()">Cerca</button>
+  </div>
+  <div class="scanner-flash" id="scannerFlash"></div>
+  <button class="scanner-close" onclick="closeScanner()">Chiudi</button>
+</div>
+
+
+<!-- VISUAL SEARCH -->
+<div class="visual-upload" id="visualOverlay" onclick="if(event.target===this)closeVisual()">
+  <div class="visual-box">
+    <h3>🖼️ Ricerca visiva</h3>
+    <div class="vis-mode-bar">
+      <button class="vis-mode-btn on" id="visModeCam" onclick="setVisMode('cam')">📷 Fotocamera</button>
+      <button class="vis-mode-btn" id="visModeFile" onclick="setVisMode('file')">📁 File</button>
+    </div>
+    <div class="vis-cam-wrap" id="visCamWrap">
+      <video id="visVideo" autoplay playsinline muted></video>
+      <button class="vis-snap-btn" onclick="visSnap()">📸</button>
+      <button class="vis-switch-btn" onclick="visSwitchCam()">🔄</button>
+    </div>
+    <canvas id="visCanvas" style="display:none"></canvas>
+    <div class="upload-area" id="uploadArea" style="display:none" onclick="document.getElementById('imgInput').click()">
+      Tocca per caricare un'immagine
+    </div>
+    <input type="file" id="imgInput" accept="image/*" capture="environment">
+    <img class="preview-img" id="previewImg" style="display:none">
+    <input class="vis-desc-input" id="visDescInput" placeholder="Descrivi cosa vedi nell'immagine..." type="text">
+    <button class="search-vis-btn" id="searchVisBtn" onclick="doVisualSearch()">🔍 Cerca dove comprare</button>
+  </div>
+</div>
+
+<!-- SHARE MODAL -->
+<div class="modal-overlay" id="shareModal">
+  <div class="modal" style="max-width:400px">
+    <div class="share-box">
+      <h3>📤 Condividi</h3>
+      <div class="share-links" id="shareLinks"></div>
+    </div>
+    <div style="text-align:right;margin-top:12px">
+      <button onclick="closeShare()" style="padding:6px 16px;border-radius:8px;background:var(--glass);color:var(--text3);font-size:.78rem">Chiudi</button>
+    </div>
+  </div>
+</div>
+
+<!-- PRICE HISTORY MODAL -->
+<div class="modal-overlay" id="historyModal">
+  <div class="modal" style="max-width:480px">
+    <h2>📈 Andamento prezzo</h2>
+    <div id="historyChart"></div>
+    <div style="text-align:right;margin-top:12px">
+      <button onclick="closeHistoryModal()" style="padding:6px 16px;border-radius:8px;background:var(--glass);color:var(--text3);font-size:.78rem">Chiudi</button>
+    </div>
+  </div>
+</div>
+
+<!-- FAB -->
+<div class="fab-group">
+  <button class="fab fab-saved" onclick="openSaved()" title="Ricerche salvate">💾</button>
+  <button class="fab fab-compare" onclick="openCompare()" title="Confronta">⚖️</button>
+  <button class="fab fab-top" id="fabTop" onclick="scrollTo({top:0,behavior:'smooth'})" title="Torna su">⬆</button>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<script>
+/* ========== STATE ========== */
+const S = {
+  query: '', lastResults: [], lastIntent: null, lastAiAnswer: null,
+  favorites: JSON.parse(localStorage.getItem('findo_favs')||'[]'),
+  history: JSON.parse(localStorage.getItem('findo_hist')||'[]'),
+  compareItems: JSON.parse(localStorage.getItem('findo_compare')||'[]'),
+  lang: localStorage.getItem('findo_lang')||'it',
+  theme: localStorage.getItem('findo_theme')||'dark',
+  savedSearches: [], loading: false
+};
+
+const i18n = {
+  it: { search:"Cerca qualsiasi cosa", results:"Risultati", favs:"Preferiti", hist:"Cronologia",
+    empty_search:"Cerca qualsiasi cosa", empty_fav:"Nessun preferito", empty_hist:"Nessuna cronologia",
+    listening:"Ascoltando...", no_speech:"Non ho capito, riprova",
+    compare_empty:"Seleziona almeno 2 risultati", alert_on:"Alert attivo", alert_off:"Alert rimosso",
+    saved:"Salvata", removed:"Rimossa", shared:"Condiviso!", price:"Prezzo", rating:"Voto",
+    distance:"Distanza", source:"Fonte", year:"Anno", mileage:"km", fuel:"Aliment." },
+  en: { search:"Search anything", results:"Results", favs:"Favorites", hist:"History",
+    empty_search:"Search anything", empty_fav:"No favorites", empty_hist:"No history",
+    listening:"Listening...", no_speech:"Didn't catch that, try again",
+    compare_empty:"Select at least 2 results", alert_on:"Alert on", alert_off:"Alert off",
+    saved:"Saved", removed:"Removed", shared:"Shared!", price:"Price", rating:"Rating",
+    distance:"Distance", source:"Source", year:"Year", mileage:"km", fuel:"Fuel" }
+};
+
+function t(k){ return (i18n[S.lang]||i18n.it)[k]||k; }
+
+/* ========== INIT ========== */
+document.documentElement.setAttribute('data-theme', S.theme);
+applyLang();
+
+function applyLang(){
+  document.getElementById('searchInput').placeholder = t('search');
+  document.querySelectorAll('[data-tab]').forEach(b => {
+    if(b.dataset.tab==='results') b.textContent=t('results');
+    if(b.dataset.tab==='favorites') b.textContent=t('favs');
+    if(b.dataset.tab==='history') b.textContent=t('hist');
+  });
+}
+
+/* ========== THEME ========== */
+document.getElementById('btnTheme').onclick = () => {
+  S.theme = S.theme==='dark'?'light':'dark';
+  document.documentElement.setAttribute('data-theme', S.theme);
+  localStorage.setItem('findo_theme', S.theme);
+};
+
+/* ========== LANG ========== */
+document.getElementById('btnLang').onclick = () => {
+  S.lang = S.lang==='it'?'en':'it';
+  localStorage.setItem('findo_lang', S.lang);
+  applyLang();
+};
+
+/* ========== TABS ========== */
+document.querySelectorAll('[data-tab]').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('[data-tab]').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+    document.getElementById('resultsArea').style.display = btn.dataset.tab==='results'?'':'none';
+    document.getElementById('favoritesArea').style.display = btn.dataset.tab==='favorites'?'':'none';
+    document.getElementById('historyArea').style.display = btn.dataset.tab==='history'?'':'none';
+    if(btn.dataset.tab==='favorites') renderFavorites();
+    if(btn.dataset.tab==='history') renderHistory();
+  };
+});
+
+/* ========== SEARCH ========== */
+const searchInput = document.getElementById('searchInput');
+const btnSearch = document.getElementById('btnSearch');
+
+searchInput.addEventListener('keydown', e => { if(e.key==='Enter') doSearch(); });
+btnSearch.onclick = doSearch;
+
+async function doSearch(q) {
+  q = q || searchInput.value.trim();
+  if(!q) return;
+  S.query = q;
+  searchInput.value = q;
+  showLoading();
+  try {
+    let url = `/api/search?q=${encodeURIComponent(q)}`;
+    if('geolocation' in navigator) {
+      try {
+        const pos = await new Promise((res,rej) => navigator.geolocation.getCurrentPosition(res,rej,{timeout:5000}));
+        url += `&lat=${pos.coords.latitude}&lon=${pos.coords.longitude}`;
+      } catch(e) { /* no geo */ }
+    }
+    const r = await fetch(url);
+    if(!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    S.lastResults = data.results || [];
+    S.lastIntent = data.intent || null;
+    S.lastAiAnswer = data.aiAnswer || null;
+    renderIntent(data.intent);
+    renderFilters(data.intent);
+    renderAiAnswer(data.aiAnswer);
+    renderResults(S.lastResults);
+    addHistory(q);
+    // Switch to results tab
+    document.querySelector('[data-tab="results"]').click();
+  } catch(e) {
+    showToast('Errore: ' + e.message, 'err');
+    document.getElementById('resultsArea').innerHTML = `<div class="empty"><div class="e-icon">⚠️</div><div class="e-title">Errore</div><div class="e-sub">${esc(e.message)}</div></div>`;
+  }
+}
+
+/* ========== LOADING ========== */
+function showLoading(){
+  document.getElementById('emptyState')?.remove();
+  document.getElementById('resultsArea').innerHTML = '<div class="loading"><span>Caricamento</span><span class="dots"></span></div>';
+}
+
+/* ========== INTENT BAR ========== */
+function renderIntent(intent) {
+  if(!intent) { document.getElementById('intentBar').innerHTML=''; return; }
+  const tags = [];
+  if(intent.kind && intent.kind!=='general') tags.push(`<span class="intent-tag kind">${intent.kind}</span>`);
+  if(intent.near) tags.push('<span class="intent-tag ok">📍 Vicino</span>');
+  if(intent.cheap) tags.push('<span class="intent-tag ok">💰 Economico</span>');
+  if(intent.expensive) tags.push('<span class="intent-tag warn">💎 Premium</span>');
+  if(intent.openNow) tags.push('<span class="intent-tag ok">🕐 Aperto ora</span>');
+  if(intent.maxPrice!=null) tags.push(`<span class="intent-tag warn"> sotto €${intent.maxPrice.toLocaleString('it')}</span>`);
+  if(intent.maxMileage!=null) tags.push(`<span class="intent-tag warn">🚗 &lt;${intent.maxMileage.toLocaleString('it')} km</span>`);
+  if(intent.minYear!=null) tags.push(`<span class="intent-tag ok">📅 dal ${intent.minYear}</span>`);
+  if(intent.fuel) tags.push(`<span class="intent-tag kind">⛽ ${intent.fuel}</span>`);
+  if(intent.used) tags.push('<span class="intent-tag warn">🔄 Usato</span>');
+  if(intent.city) tags.push(`<span class="intent-tag kind">🏙️ ${esc(intent.city)}</span>`);
+  document.getElementById('intentBar').innerHTML = tags.join('');
+}
+
+/* ========== FILTERS ========== */
+function renderFilters(intent) {
+  if(!intent) { document.getElementById('filters').innerHTML=''; return; }
+  const f = [];
+  f.push({key:'sort-best',label:'Rilevanza',sort:'best'});
+  f.push({key:'sort-price',label:'Prezzo ↑',sort:'price'});
+  f.push({key:'sort-dist',label:'Distanza',sort:'distance'});
+  const html = f.map(x => `<button class="filter-btn${intent.sort===x.sort?' on':''}" onclick="reSort('${x.sort}')">${x.label}</button>`).join('');
+  document.getElementById('filters').innerHTML = html;
+}
+
+function reSort(sort) {
+  if(!S.lastIntent) return;
+  S.lastIntent.sort = sort;
+  const sorted = [...S.lastResults];
+  if(sort==='price') sorted.sort((a,b)=>(a.price??1e12)-(b.price??1e12));
+  else if(sort==='distance') sorted.sort((a,b)=>(a.distanceKm??1e12)-(b.distanceKm??1e12));
+  else sorted.sort((a,b)=>(b.score||0)-(a.score||0));
+  S.lastResults = sorted;
+  renderResults(sorted);
+  renderFilters(S.lastIntent);
+}
+
+/* ========== AI ANSWER ========== */
+function renderAiAnswer(answer) {
+  const el = document.getElementById('aiAnswer');
+  if(!answer) { el.style.display='none'; return; }
+  el.style.display='';
+  document.getElementById('aiText').textContent = answer;
+}
+
+/* ========== RENDER RESULTS ========== */
+function renderResults(results) {
+  const area = document.getElementById('resultsArea');
+  if(!results.length) {
+    area.innerHTML = `<div class="empty"><div class="e-icon">😕</div><div class="e-title">Nessun risultato</div><div class="e-sub">Prova a modificare la ricerca</div></div>`;
+    return;
+  }
+  const compareIds = new Set(S.compareItems.map(c=>c.id));
+  const favIds = new Set(S.favorites.map(f=>f.id));
+  let html = '';
+  for (const r of results) {
+    const isFav = favIds.has(r.id);
+    const isComp = compareIds.has(r.id);
+    const hasAlert = S.savedSearches.some(s => s.query && s.query.includes(S.query));
+    html += `<div class="result-card" data-id="${r.id}">
+      <div class="result-title">
+        <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.title)}</a>
+        <button class="btn-fav${isFav?' on':''}" onclick="toggleFav('${r.id}')" title="Preferito">${isFav?'❤️':'🤍'}</button>
+      </div>
+      ${r.image?`<img class="result-image" src="${esc(r.image)}" loading="lazy" alt="" onerror="this.style.display='none'">`:''}
+      <div class="result-desc">${esc(r.description)}</div>
+      <div class="result-meta">
+        ${r.price!=null?`<span class="price">€ ${Number(r.price).toLocaleString('it')}</span>`:''}
+        ${r.rating!=null?`<span class="rating">★ ${r.rating}</span>`:''}
+        <span class="source">${esc(r.source)}</span>
+        ${r.distanceKm!=null?`<span class="dist">📍 ${r.distanceKm} km</span>`:''}
+        ${r.openNow===true?'<span class="open">Aperto</span>':(r.openNow===false?'<span class="closed">Chiuso</span>':'')}
+        ${r.year?`<span class="vehicle">📅 ${r.year}</span>`:''}
+        ${r.mileage!=null?`<span class="vehicle">🛣️ ${Number(r.mileage).toLocaleString('it')} km</span>`:''}
+        ${r.fuel?`<span class="vehicle">⛽ ${esc(r.fuel)}</span>`:''}
+      </div>
+      ${r.why?.length?`<div class="result-why">${r.why.map(w=>`<span>${esc(w)}</span>`).join('')}</div>`:''}
+      <div class="result-actions">
+        <button class="btn-alert${hasAlert?' on':''}" onclick="toggleAlert('${r.id}','${esc(S.query)}')">🔔 ${hasAlert?'Alert on':'Alert'}</button>
+        <button class="btn-compare${isComp?' on':''}" onclick="toggleCompare('${r.id}')">⚖️ ${isComp?'Nel confronto':'Confronta'}</button>
+        <button class="btn-share" onclick="shareResult('${r.id}')">📤</button>
+        ${r.price!=null?`<button class="btn-history" onclick="showPriceHistory('${esc(r.url)}')">📈</button>`:''}
+        ${r.url&&r.price!=null?`<a class="btn-buy" href="${esc(r.url)}" target="_blank" rel="noopener">Acquista →</a>`:''}
+      </div>
+    </div>`;
+  }
+  area.innerHTML = html;
+}
+
+/* ========== FAVORITES ========== */
+function toggleFav(id) {
+  const idx = S.favorites.findIndex(f=>f.id===id);
+  if(idx>=0) { S.favorites.splice(idx,1); showToast('Rimosso dai preferiti','warn'); }
+  else {
+    const r = S.lastResults.find(x=>x.id===id);
+    if(r) { S.favorites.push(r); showToast('Aggiunto ai preferiti','ok'); }
+  }
+  localStorage.setItem('findo_favs', JSON.stringify(S.favorites));
+  renderResults(S.lastResults);
+}
+
+function renderFavorites() {
+  const area = document.getElementById('favoritesArea');
+  if(!S.favorites.length) {
+    area.innerHTML = `<div class="empty" id="favEmpty"><div class="e-icon">⭐</div><div class="e-title">${t('empty_fav')}</div><div class="e-sub">Salva i risultati migliori</div></div>`;
+    return;
+  }
+  let html = '';
+  for (const f of S.favorites) {
+    html += `<div class="fav-item" onclick="window.open('${esc(f.url)}','_blank')">
+      <span class="hi-text">${esc(f.title)}</span>
+      ${f.price!=null?`<span style="color:var(--ok);font-weight:700;font-size:.82rem;margin-left:8px">€${Number(f.price).toLocaleString('it')}</span>`:''}
+      <span class="hi-del" onclick="event.stopPropagation();removeFav('${f.id}')">✕</span>
+    </div>`;
+  }
+  area.innerHTML = html;
+}
+
+function removeFav(id) {
+  S.favorites = S.favorites.filter(f=>f.id!==id);
+  localStorage.setItem('findo_favs', JSON.stringify(S.favorites));
+  renderFavorites();
+}
+
+/* ========== HISTORY ========== */
+function addHistory(q) {
+  const dup = S.history.findIndex(h=>h.q===q);
+  if(dup>=0) S.history.splice(dup,1);
+  S.history.unshift({q, t:Date.now()});
+  if(S.history.length>50) S.history.length=50;
+  localStorage.setItem('findo_hist', JSON.stringify(S.history));
+}
+
+function renderHistory() {
+  const area = document.getElementById('historyArea');
+  if(!S.history.length) {
+    area.innerHTML = `<div class="empty" id="histEmpty"><div class="e-icon">🕐</div><div class="e-title">${t('empty_hist')}</div><div class="e-sub">Le tue ricerche appariranno qui</div></div>`;
+    return;
+  }
+  let html = '';
+  for (const h of S.history) {
+    const ago = timeAgo(h.t);
+    html += `<div class="history-item" onclick="doSearch('${esc(h.q)}')">
+      <span class="hi-text">${esc(h.q)}</span>
+      <span class="hi-time">${ago}</span>
+      <span class="hi-del" onclick="event.stopPropagation();delHist('${esc(h.q)}')">✕</span>
+    </div>`;
+  }
+  area.innerHTML = html;
+}
+
+function delHist(q) {
+  S.history = S.history.filter(h=>h.q!==q);
+  localStorage.setItem('findo_hist', JSON.stringify(S.history));
+  renderHistory();
+}
+
+function timeAgo(ts) {
+  const s=Math.floor((Date.now()-ts)/1000);
+  if(s<60) return 'ora';
+  if(s<3600) return Math.floor(s/60)+' min';
+  if(s<86400) return Math.floor(s/3600)+' ore';
+  return Math.floor(s/86400)+' giorni';
+}
+
+/* ========== COMPARE ========== */
+function toggleCompare(id) {
+  const idx = S.compareItems.findIndex(c=>c.id===id);
+  if(idx>=0) { S.compareItems.splice(idx,1); }
+  else {
+    const r = S.lastResults.find(x=>x.id===id);
+    if(r) {
+      if(S.compareItems.length>=4) { showToast('Massimo 4 elementi nel confronto','warn'); return; }
+      S.compareItems.push(r);
+    }
+  }
+  localStorage.setItem('findo_compare', JSON.stringify(S.compareItems));
+  renderResults(S.lastResults);
+  showToast(S.compareItems.length+' elementi nel confronto');
+}
+
+function openCompare() {
+  if(S.compareItems.length<2) { showToast(t('compare_empty'),'warn'); return; }
+  const grid = document.getElementById('compareGrid');
+  const items = S.compareItems;
+  const cols = items.map(item => {
+    const rows = [];
+    rows.push({label:t('price'), val:item.price!=null?`€${Number(item.price).toLocaleString('it')}`:'—'});
+    rows.push({label:t('rating'), val:item.rating!=null?`★ ${item.rating}`:'—'});
+    rows.push({label:t('distance'), val:item.distanceKm!=null?`${item.distanceKm} km`:'—'});
+    rows.push({label:t('source'), val:item.source||'—'});
+    rows.push({label:t('year'), val:item.year||'—'});
+    rows.push({label:t('mileage'), val:item.mileage!=null?`${Number(item.mileage).toLocaleString('it')} km`:'—'});
+    rows.push({label:t('fuel'), val:item.fuel||'—'});
+    return {item, rows};
+  });
+
+  // Find best price
+  const prices = items.filter(i=>i.price!=null).map(i=>i.price);
+  const minPrice = prices.length ? Math.min(...prices) : null;
+
+  let html = '';
+  for (const col of cols) {
+    html += `<div class="compare-col">
+      <div class="c-title"><a href="${esc(col.item.url)}" target="_blank">${esc(col.item.title)}</a></div>
+      ${col.rows.map(r => {
+        const isBest = r.label===t('price') && col.item.price!=null && col.item.price===minPrice;
+        const cls = isBest ? 'c-best' : '';
+        return `<div class="compare-row"><span class="c-label">${esc(r.label)}</span><span class="c-val ${cls}">${esc(r.val)}</span></div>`;
+      }).join('')}
+    </div>`;
+  }
+  grid.innerHTML = html;
+  document.getElementById('compareModal').classList.add('show');
+}
+
+function closeCompare(){ document.getElementById('compareModal').classList.remove('show'); }
+
+function shareCompare(){
+  const text = S.compareItems.map(i => `${i.title}: €${i.price!=null?Number(i.price).toLocaleString('it'):'?'}`).join('\n');
+  const shareData = {title:'Confronto FINDO', text:'Confronto FINDO:\n'+text, url:location.href};
+  if(navigator.share) navigator.share(shareData).catch(()=>{});
+  else { navigator.clipboard.writeText(text).then(()=>showToast(t('shared'),'ok')); }
+  closeCompare();
+}
+
+/* ========== ALERTS ========== */
+async function toggleAlert(id, query) {
+  if(!query) return;
+  const existing = S.savedSearches.find(s=>s.query===query);
+  if(existing) {
+    await fetch(`/api/saved-searches/${existing.id}`,{method:'DELETE'});
+    showToast(t('alert_off'),'warn');
+  } else {
+    await fetch('/api/saved-searches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query,alert:{kind:S.lastIntent?.kind||'general',priceDrop:true}})});
+    showToast(t('alert_on'),'ok');
+  }
+  loadSavedSearches();
+}
+
+async function loadSavedSearches(){
+  try { S.savedSearches = await (await fetch('/api/saved-searches')).json(); } catch{ S.savedSearches=[]; }
+}
+
+function openSaved() {
+  renderSavedList();
+  document.getElementById('savedPanel').classList.add('show');
+}
+function closeSaved() { document.getElementById('savedPanel').classList.remove('show'); }
+
+function renderSavedList() {
+  const el = document.getElementById('savedList');
+  if(!S.savedSearches.length) { el.innerHTML='<div style="color:var(--text3);font-size:.85rem;padding:12px">Nessuna ricerca salvata</div>'; return; }
+  let html='';
+  for (const s of S.savedSearches) {
+    html += `<div class="saved-item">
+      <div><div class="si-query">${esc(s.query)}</div><div class="si-meta">${s.alert?.priceDrop?'🔔 Alert prezzo':''} · ${s.kind||'generale'}</div></div>
+      <div class="si-actions">
+        <button style="background:var(--glass);color:var(--acc)" onclick="doSearch('${esc(s.query)}');closeSaved()">Cerca</button>
+        <button style="background:rgba(239,68,68,.08);color:var(--err)" onclick="delSavedSearch('${s.id}')">✕</button>
+      </div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+async function delSavedSearch(id) {
+  await fetch(`/api/saved-searches/${id}`,{method:'DELETE'});
+  loadSavedSearches();
+  renderSavedList();
+}
+
+/* ========== PRICE HISTORY ========== */
+async function showPriceHistory(url) {
+  try {
+    const data = await (await fetch(`/api/price-history?url=${encodeURIComponent(url)}`)).json();
+    if(!data.prices?.length) { showToast('Nessun dato storico','warn'); return; }
+    const chart = document.getElementById('historyChart');
+    const prices = data.prices;
+    const min = Math.min(...prices.map(p=>p.price));
+    const max = Math.max(...prices.map(p=>p.price));
+    const range = max-min||1;
+    const w = 320, h = 100, px = 8;
+    const step = (w-2*px) / Math.max(1,prices.length-1);
+    let points = prices.map((p,i) => `${px+i*step},${h-px-((p.price-min)/range)*(h-2*px)}`);
+    const polyline = points.join(' ');
+    const lastPrice = prices[prices.length-1].price;
+    const firstPrice = prices[0].price;
+    const diff = lastPrice - firstPrice;
+    const diffColor = diff<0?'var(--ok)':'var(--err)';
+    const diffText = diff<0?`↓ €${Math.abs(diff).toLocaleString('it')}`:(diff>0?`↑ €${diff.toLocaleString('it')}`:'=');
+
+    chart.innerHTML = `
+      <div style="font-size:.78rem;color:var(--text3);margin-bottom:4px">${esc(data.title||'')} · ${prices.length} rilevamenti</div>
+      <div style="font-size:1.1rem;font-weight:700;color:var(--ok);margin-bottom:8px">€ ${lastPrice.toLocaleString('it')} <span style="font-size:.78rem;color:${diffColor}">${diffText}</span></div>
+      <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto">
+        <polyline points="${polyline}" fill="none" stroke="var(--ok)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        ${prices.map((p,i)=>`<circle cx="${px+i*step}" cy="${h-px-((p.price-min)/range)*(h-2*px)}" r="3" fill="var(--ok)" title="${p.date}: €${p.price.toLocaleString('it')}"/>`).join('')}
+      </svg>
+      <div style="display:flex;justify-content:space-between;font-size:.68rem;color:var(--muted);margin-top:4px">
+        <span>${prices[0].date}</span><span>${prices[prices.length-1].date}</span>
+      </div>`;
+    document.getElementById('historyModal').classList.add('show');
+  } catch(e) { showToast('Errore cronologia prezzi','err'); }
+}
+function closeHistoryModal(){ document.getElementById('historyModal').classList.remove('show'); }
+
+/* ========== VOICE SEARCH ========== */
+let recognition = null;
+document.getElementById('btnVoice').onclick = startVoice;
+
+function startVoice() {
+  if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+    showToast('Ricerca vocale non supportata','warn'); return;
+  }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = S.lang==='it'?'it-IT':'en-US';
+  recognition.interimResults = true;
+  recognition.continuous = false;
+
+  recognition.onstart = () => {
+    document.getElementById('voiceOverlay').classList.add('show');
+    document.getElementById('btnVoice').classList.add('listening');
+    document.getElementById('voiceText').textContent = t('listening');
+  };
+  recognition.onresult = (e) => {
+    let transcript = '';
+    for(let i=e.resultIndex;i<e.results.length;i++) transcript += e.results[i][0].transcript;
+    document.getElementById('voiceText').textContent = transcript;
+    if(e.results[0].isFinal) {
+      stopVoice();
+      searchInput.value = transcript;
+      doSearch(transcript);
+    }
+  };
+  recognition.onerror = (e) => {
+    stopVoice();
+    if(e.error==='no-speech') showToast(t('no_speech'),'warn');
+    else showToast('Errore vocale: '+e.error,'err');
+  };
+  recognition.onend = () => stopVoice();
+  recognition.start();
+}
+
+function stopVoice() {
+  if(recognition) { try{recognition.stop();}catch(e){} recognition=null; }
+  document.getElementById('voiceOverlay').classList.remove('show');
+  document.getElementById('btnVoice').classList.remove('listening');
+}
+
+/* ========== BARCODE SCANNER (REAL CAMERA) ========== */
+let scannerStream = null;
+let scannerRAF = null;
+let barcodeDetector = null;
+let scannerCanvas = null;
+let scannerCtx = null;
+let zxingReader = null;
+let zxingControls = null;
+
+async function loadZXing() {
+  if (window.ZXingBrowser) return true;
+  if (window._zxingLoading) {
+    return await new Promise(resolve => {
+      const t=setInterval(()=>{ if(window.ZXingBrowser){clearInterval(t);resolve(true)} },100);
+      setTimeout(()=>{clearInterval(t);resolve(!!window.ZXingBrowser)},5000);
+    });
+  }
+  window._zxingLoading=true;
+  return await new Promise(resolve=>{
+    const sc=document.createElement('script');
+    sc.src='https://unpkg.com/@zxing/browser@0.1.5/umd/index.min.js';
+    sc.onload=()=>{window._zxingLoading=false;resolve(!!window.ZXingBrowser)};
+    sc.onerror=()=>{window._zxingLoading=false;resolve(false)};
+    document.head.appendChild(sc);
+  });
+}
+
+
+// Check for native BarcodeDetector API
+if ('BarcodeDetector' in window) {
+  barcodeDetector = new BarcodeDetector({ formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','qr_code','itf','codabar'] });
+}
+
+document.getElementById('btnCamera').onclick = openScanner;
+document.getElementById('btnVisual').onclick = openVisual;
+
+async function openScanner() {
+  document.getElementById('scannerOverlay').classList.add('show');
+  document.getElementById('scannerDetected').textContent = '';
+  document.getElementById('barcodeInput').value = '';
+  document.getElementById('scannerBadge').textContent = 'Avvio scanner…';
+
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera non disponibile');
+    scannerStream = await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}
+    });
+    const video=document.getElementById('scannerVideo');
+    video.srcObject=scannerStream;
+    await video.play();
+
+    if (barcodeDetector) {
+      document.getElementById('scannerBadge').textContent='Scanner attivo — inquadra EAN/UPC';
+      startScanLoop();
+      return;
+    }
+
+    const ok=await loadZXing();
+    if (ok && window.ZXingBrowser?.BrowserMultiFormatReader) {
+      document.getElementById('scannerBadge').textContent='Scanner attivo — inquadra il codice';
+      zxingReader=new window.ZXingBrowser.BrowserMultiFormatReader();
+      try {
+        zxingControls=await zxingReader.decodeFromVideoElement(video,(result,err)=>{
+          if(result){
+            onBarcodeDetected(result.getText(), result.getBarcodeFormat?.() || 'BARCODE');
+          }
+        });
+        return;
+      } catch(e){ console.warn('ZXing scanner error',e); }
+    }
+
+    // Last-resort QR fallback.
+    if (!window.jsQR) {
+      const sc=document.createElement('script');
+      sc.src='https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js';
+      document.head.appendChild(sc);
+    }
+    document.getElementById('scannerBadge').textContent='Scanner base attivo';
+    startScanLoop();
+  } catch(err) {
+    console.warn('Camera scanner:',err);
+    document.getElementById('scannerBadge').textContent='Fotocamera non disponibile';
+    document.getElementById('scannerDetected').textContent='Inserisci il codice manualmente';
+    document.getElementById('barcodeInput').focus();
+  }
+}
+
+function startScanLoop() {
+  const video=document.getElementById('scannerVideo');
+  if(!video.srcObject) return;
+  async function scanFrame(){
+    if(video.readyState<video.HAVE_ENOUGH_DATA){
+      scannerRAF=requestAnimationFrame(scanFrame); return;
+    }
+    if(barcodeDetector){
+      try{
+        const barcodes=await barcodeDetector.detect(video);
+        if(barcodes?.length){
+          onBarcodeDetected(barcodes[0].rawValue,barcodes[0].format);
+          return;
+        }
+      }catch{}
+    }
+    if(window.jsQR){
+      try{
+        if(!scannerCanvas){
+          scannerCanvas=document.createElement('canvas');
+          scannerCtx=scannerCanvas.getContext('2d',{willReadFrequently:true});
+        }
+        scannerCanvas.width=video.videoWidth;
+        scannerCanvas.height=video.videoHeight;
+        scannerCtx.drawImage(video,0,0);
+        const data=scannerCtx.getImageData(0,0,scannerCanvas.width,scannerCanvas.height);
+        const qr=window.jsQR(data.data,data.width,data.height,{inversionAttempts:'attemptBoth'});
+        if(qr?.data){onBarcodeDetected(qr.data,'QR_CODE');return;}
+      }catch{}
+    }
+    scannerRAF=requestAnimationFrame(scanFrame);
+  }
+  scannerRAF=requestAnimationFrame(scanFrame);
+}
+
+function onBarcodeDetected(code, format) {
+  // Flash effect
+  const flash = document.getElementById('scannerFlash');
+  flash.classList.add('on');
+  setTimeout(() => flash.classList.remove('on'), 200);
+
+  // Show detected code
+  document.getElementById('scannerDetected').textContent = `✅ Rilevato: ${code}`;
+  document.getElementById('scannerBadge').textContent = `Codice ${format || ''} rilevato!`;
+  document.getElementById('barcodeInput').value = code;
+
+  // Vibrate if supported
+  if (navigator.vibrate) navigator.vibrate(100);
+
+  // Auto-search after brief delay
+  setTimeout(() => {
+    closeScanner();
+    searchBarcodeByCode(code);
+  }, 600);
+}
+
+function closeScanner() {
+  document.getElementById('scannerOverlay').classList.remove('show');
+  if (scannerRAF) { cancelAnimationFrame(scannerRAF); scannerRAF = null; }
+  if (zxingControls) { try { zxingControls.stop(); } catch {} zxingControls=null; }
+  if (zxingReader) { try { zxingReader.reset(); } catch {} zxingReader=null; }
+  if (scannerStream) {
+    scannerStream.getTracks().forEach(t => t.stop());
+    scannerStream = null;
+  }
+  const video = document.getElementById('scannerVideo');
+  video.srcObject = null;
+}
+
+function searchBarcode() {
+  const code = document.getElementById('barcodeInput').value.trim();
+  if (!code) return;
+  closeScanner();
+  searchBarcodeByCode(code);
+}
+
+async function searchBarcodeByCode(code) {
+  searchInput.value = `Barcode: ${code}`;
+  showLoading();
+  try {
+    const r = await fetch(`/api/barcode?code=${encodeURIComponent(code)}`);
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error||'Ricerca visiva non riuscita');
+    S.lastResults = d.results || [];
+    S.lastIntent = { kind: d.kind || 'product', used: false, cheap: false, near: false, openNow: false, coreTerms: d.productName ? [d.productName] : [code], terms: [code], sort: 'best' };
+    if (d.aiAnswer) {
+      document.getElementById('aiAnswer').style.display = '';
+      document.getElementById('aiText').textContent = d.aiAnswer;
+    } else {
+      document.getElementById('aiAnswer').style.display = 'none';
+    }
+    renderResults();
+    addHistory(`Barcode: ${code}`);
+  } catch (e) {
+    showToast('Errore ricerca barcode', 'err');
+    hideLoading();
+  }
+}
+
+// Enter in barcode input
+document.getElementById('barcodeInput').addEventListener('keydown', e => { if (e.key === 'Enter') searchBarcode(); });
+
+/* ========== VISUAL SEARCH (REAL CAMERA) ========== */
+let visStream = null;
+let visCamFacing = 'environment';
+let visMode = 'cam'; // 'cam' or 'file'
+let visCapturedImage = null; // base64 data URL of captured image
+
+function openVisual() {
+  document.getElementById('visualOverlay').classList.add('show');
+  document.getElementById('previewImg').style.display = 'none';
+  document.getElementById('visDescInput').value = '';
+  document.getElementById('visCamWrap').classList.add('on');
+  document.getElementById('uploadArea').style.display = 'none';
+  document.getElementById('imgInput').value = '';
+  visCapturedImage = null;
+  setVisMode('cam');
+  startVisCamera();
+}
+
+function closeVisual() {
+  document.getElementById('visualOverlay').classList.remove('show');
+  stopVisCamera();
+}
+
+function setVisMode(mode) {
+  visMode = mode;
+  document.getElementById('visModeCam').classList.toggle('on', mode === 'cam');
+  document.getElementById('visModeFile').classList.toggle('on', mode === 'file');
+  if (mode === 'cam') {
+    document.getElementById('visCamWrap').classList.add('on');
+    document.getElementById('uploadArea').style.display = 'none';
+    startVisCamera();
+  } else {
+    document.getElementById('visCamWrap').classList.remove('on');
+    document.getElementById('uploadArea').style.display = '';
+    stopVisCamera();
+  }
+}
+
+async function startVisCamera() {
+  if (visStream) return; // already running
+  try {
+    visStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: visCamFacing, width: { ideal: 1920 }, height: { ideal: 1080 } }
+    });
+    const video = document.getElementById('visVideo');
+    video.srcObject = visStream;
+    await video.play();
+  } catch (err) {
+    console.warn('Visual search camera error:', err);
+    // Fallback to file mode
+    setVisMode('file');
+  }
+}
+
+function stopVisCamera() {
+  if (visStream) {
+    visStream.getTracks().forEach(t => t.stop());
+    visStream = null;
+  }
+  const video = document.getElementById('visVideo');
+  video.srcObject = null;
+}
+
+function visSwitchCam() {
+  visCamFacing = visCamFacing === 'environment' ? 'user' : 'environment';
+  stopVisCamera();
+  startVisCamera();
+}
+
+function visSnap() {
+  const video = document.getElementById('visVideo');
+  const canvas = document.getElementById('visCanvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0);
+  const maxSide=1280;
+  const scale=Math.min(1,maxSide/Math.max(canvas.width,canvas.height));
+  const outCanvas=document.createElement('canvas');
+  outCanvas.width=Math.max(1,Math.round(canvas.width*scale));
+  outCanvas.height=Math.max(1,Math.round(canvas.height*scale));
+  outCanvas.getContext('2d').drawImage(canvas,0,0,outCanvas.width,outCanvas.height);
+  visCapturedImage=outCanvas.toDataURL('image/jpeg',0.72);
+
+  // Show preview
+  document.getElementById('previewImg').src = visCapturedImage;
+  document.getElementById('previewImg').style.display = '';
+  document.getElementById('visDescInput').placeholder = 'Descrivi cosa vedi nella foto...';
+
+  // Vibrate
+  if (navigator.vibrate) navigator.vibrate(50);
+
+  showToast('📸 Foto catturata!', 'ok');
+}
+
+// File input handler
+document.getElementById('imgInput').onchange = function() {
+  const file = this.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const img=new Image();
+    img.onload=()=>{
+      const maxSide=1280;
+      const scale=Math.min(1,maxSide/Math.max(img.width,img.height));
+      const c=document.createElement('canvas');
+      c.width=Math.max(1,Math.round(img.width*scale));
+      c.height=Math.max(1,Math.round(img.height*scale));
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+      visCapturedImage=c.toDataURL('image/jpeg',0.72);
+      document.getElementById('previewImg').src=visCapturedImage;
+      document.getElementById('previewImg').style.display='';
+      document.getElementById('visDescInput').placeholder='Descrivi cosa vedi nell\'immagine...';
+    };
+    img.src=e.target.result;
+  };
+  reader.readAsDataURL(file);
+};
+
+async function doVisualSearch() {
+  const description = document.getElementById('visDescInput').value.trim();
+  if (!description && !visCapturedImage) {
+    showToast('Scatta una foto o descrivi l\'oggetto', 'warn');
+    return;
+  }
+
+  closeVisual();
+  searchInput.value = description || 'Ricerca visiva...';
+  showLoading();
+
+  try {
+    const r = await fetch('/api/visual-search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image: visCapturedImage || null,
+        description: description || null
+      })
+    });
+    const d = await r.json();
+    S.lastResults = d.results || [];
+    S.lastIntent = { kind: d.kind || 'product', used: false, cheap: false, near: false, openNow: false, coreTerms: [description || 'visual search'], terms: [description || 'visual search'], sort: 'best' };
+    if (d.aiAnswer) {
+      document.getElementById('aiAnswer').style.display = '';
+      document.getElementById('aiText').textContent = d.aiAnswer;
+    } else {
+      document.getElementById('aiAnswer').style.display = 'none';
+    }
+    renderResults();
+    addHistory(description || 'Ricerca visiva');
+  } catch (e) {
+    // Fallback: search by description directly
+    if (description) {
+      doSearch(description);
+    } else {
+      showToast('Errore ricerca visiva', 'err');
+      hideLoading();
+    }
+  }
+}
+
+/* ========== SHARE ========== */
+function shareResult(id) {
+  const r = S.lastResults.find(x=>x.id===id);
+  if(!r) return;
+  const shareData = {
+    title: 'FINDO: ' + r.title,
+    text: `${r.title} — €${r.price!=null?Number(r.price).toLocaleString('it'):'?'} · ${r.source}`,
+    url: r.url
+  };
+  if(navigator.share) {
+    navigator.share(shareData).catch(()=>copyShare(r));
+  } else {
+    copyShare(r);
+  }
+}
+
+function copyShare(r) {
+  const text = `${r.title} — €${r.price!=null?Number(r.price).toLocaleString('it'):'?'} · ${r.source} · ${r.url}`;
+  navigator.clipboard.writeText(text).then(()=>showToast(t('shared'),'ok'));
+}
+
+/* ========== EXTRACT (on-demand) ========== */
+async function extractDetail(url) {
+  try {
+    const r = await fetch('/api/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls:[url]})});
+    const d = await r.json();
+    if(d.results?.[0]?.content) return d.results[0].content.slice(0,500);
+  } catch(e) {}
+  return null;
+}
+
+/* ========== TOAST ========== */
+let toastTimer;
+function showToast(msg, type='') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show' + (type?' toast-'+type:'');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>el.className='toast', 2500);
+}
+
+/* ========== UTILS ========== */
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+/* ========== SCROLL FAB ========== */
+window.addEventListener('scroll', () => {
+  document.getElementById('fabTop').classList.toggle('show', window.scrollY > 400);
+});
+
+/* ========== SERVICE WORKER ========== */
+if('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js?v=8.0').catch(()=>{});
+}
+
+/* ========== INIT ========== */
+loadSavedSearches();
+
+// Check URL params for shared search
+const params = new URLSearchParams(location.search);
+if(params.get('q')) doSearch(params.get('q'));
+</script>
+</body>
+</html>
+{
+  "name": "FINDO — Cerca, confronta e trova",
+  "short_name": "FINDO",
+  "description": "Cerca, confronta e trova qualsiasi cosa. Auto, prodotti, hotel, ristoranti, voli e molto altro.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f0b1a",
+  "theme_color": "#7c3aed",
+  "orientation": "portrait",
+  "categories": ["shopping", "lifestyle", "utilities"],
+  "icons": [
+    {"src": "/icon-192x192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/icon-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ],
+  "screenshots": [],
+  "prefer_related_applications": false
+}
+const CACHE_NAME = 'findo-v7';
+const PRECACHE = ['/'];
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(
+    caches.open(CACHE_NAME).then(c => c.addAll(PRECACHE)).then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener('activate', (e) => {
+  e.waitUntil(
+    caches.keys().then(keys => Promise.all(
+      keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))
+    )).then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', (e) => {
+  const url = new URL(e.request.url);
+  // API calls: network first
+  if (url.pathname.startsWith('/api/')) {
+    e.respondWith(
+      fetch(e.request).then(r => {
+        if (r.ok) {
+          const clone = r.clone();
+          caches.open(CACHE_NAME).then(c => c.put(e.request, clone));
+        }
+        return r;
+      }).catch(() => caches.match(e.request))
+    );
+    return;
+  }
+  // Static assets: cache first
+  e.respondWith(
+    caches.match(e.request).then(cached => cached || fetch(e.request).then(r => {
+      if (r.ok) {
+        const clone = r.clone();
+        caches.open(CACHE_NAME).then(c => c.put(e.request, clone));
+      }
+      return r;
+    }))
+  );
+});
+
+// Push notification handler
+self.addEventListener('push', (e) => {
+  const data = e.data ? e.data.json() : {};
+  const title = data.title || 'FINDO';
+  const options = {
+    body: data.body || 'Nuovi risultati disponibili',
+    icon: data.icon || '/manifest.json',
+    badge: data.badge || '',
+    data: { url: data.url || '/' },
+    vibrate: [100, 50, 100],
+    tag: data.tag || 'findo-alert',
+    requireInteraction: false
+  };
+  e.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const url = e.notification.data?.url || '/';
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window' }).then(clients => {
+      for (const client of clients) {
+        if (client.url.includes(self.location.origin) && 'focus' in client) {
+          return client.navigate(url).then(c => c.focus());
+        }
+      }
+      return self.clients.openWindow(url);
+    })
+  );
+});
