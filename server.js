@@ -13,9 +13,9 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "8.0.0";
+const VERSION = "9.0.0";
 
-app.use(express.json({limit:"12mb"}));
+app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
 
 // ── Static files: on Vercel, public/ is served by CDN automatically ──
@@ -179,14 +179,15 @@ function intentQuery(q, intent) {
 
 /* ========== SEMANTIC & KIND ENFORCEMENT ========== */
 function semanticMatch(x, intent) {
-  const text = `${x.title||''} ${x.description||''}`.toLowerCase();
-  const terms = intent.coreTerms || intent.terms || [];
-  if (!terms.length) return 0;
-  let hit = 0;
-  for (const t of terms) { if (text.includes(t.toLowerCase())) hit++; }
-  return Math.min(1, hit / Math.max(1, Math.min(terms.length, 3)));
+  const title=String(x.title||"").toLowerCase(); const text=`${title} ${x.description||""}`.toLowerCase();
+  const terms=(intent.coreTerms||intent.terms||[]).map(clean).filter(t=>t.length>=2);
+  if(!terms.length) return 0;
+  let hit=0;
+  for(const t of terms){const z=t.toLowerCase(); if(title.includes(z)) hit+=1.25; else if(text.includes(z)) hit+=1;}
+  const phrase=terms.filter(t=>t.includes(" ")).sort((a,b)=>b.length-a.length)[0];
+  if(phrase && text.includes(phrase.toLowerCase())) hit+=1.5;
+  return Math.min(1,hit/Math.max(1,Math.min(terms.length,3)));
 }
-
 function kindEnforcement(x, intent) {
   const text = `${x.title||''} ${x.description||''}`.toLowerCase();
   const kind = intent.kind;
@@ -206,17 +207,28 @@ function kindEnforcement(x, intent) {
 
 /* ========== PRICE / RATING PARSING ========== */
 function priceOf(s, kind=null) {
-  const text = String(s||'').replace(/\u00a0/g,' ');
-  const candidates = [];
-  const re = /(?:€|EUR)\s*([\d.]+(?:,\d+)?)|([\d.]+(?:,\d+)?)\s*(?:€|EUR)/gi;
-  let m; while((m=re.exec(text))) { const raw=(m[1]||m[2]).replace(/\.(?=\d{3}(?:\D|$))/g,'').replace(',','.'); const n=Number(raw); if(Number.isFinite(n)) candidates.push(n); }
+  const text=String(s||"").replace(/\u00a0/g," ");
+  const candidates=[]; const re=/(?:€|EUR)\s*([\d.]+(?:,\d+)?)|([\d.]+(?:,\d+)?)\s*(?:€|EUR)/gi;
+  let m;
+  while((m=re.exec(text))){
+    const raw=(m[1]||m[2]).replace(/\.(?=\d{3}(?:\D|$))/g,"").replace(",","."); const n=Number(raw); if(!Number.isFinite(n)) continue;
+    const ctx=text.slice(Math.max(0,m.index-45),Math.min(text.length,m.index+45));
+    if(/\b(al\s*mese|mensile|mese|rate|rata|settimana|giorno|a\s*partire\s*da)\b/i.test(ctx)) continue;
+    candidates.push({n,idx:m.index,ctx});
+  }
   if(!candidates.length) return null;
-  if(kind==='motorcycle'||kind==='car') { const plausible=candidates.filter(n=>n>=500&&n<=500000); return plausible.length?plausible[0]:null; }
-  if(kind==='realestate') { const plausible=candidates.filter(n=>n>=5000&&n<=5000000); return plausible.length?plausible[0]:null; }
-  if(kind==='job') return candidates[0];
-  return candidates[0];
+  let plausible=candidates;
+  if(kind==='motorcycle'||kind==='car') plausible=candidates.filter(x=>x.n>=500&&x.n<=500000);
+  else if(kind==='realestate') plausible=candidates.filter(x=>x.n>=5000&&x.n<=5000000);
+  else if(kind==='product') plausible=candidates.filter(x=>x.n>=1&&x.n<=1000000);
+  if(!plausible.length) plausible=candidates;
+  plausible.sort((a,b)=>{
+    const wa=/\b(prezzo|offerta|costo|totale|listino|vendita)\b/i.test(a.ctx)?-1:0;
+    const wb=/\b(prezzo|offerta|costo|totale|listino|vendita)\b/i.test(b.ctx)?-1:0;
+    return wa-wb || a.idx-b.idx;
+  });
+  return plausible[0].n;
 }
-
 function ratingOf(s) {
   const m = String(s).match(/([1-5](?:[.,]\d)?)\s*(?:\/\s*5|⭐|stelle|stars?)/i);
   return m ? Number(m[1].replace(',','.')) : null;
@@ -252,9 +264,9 @@ function rank(items, intent={sort:"best"}) {
   const arr = items.map(normalize);
   const sort = intent.sort||"best";
   for (const x of arr) {
-    let score = 35;
+    let score = 25;
     const match = semanticMatch(x, intent);
-    if (match) { score += match*30; if(match>=0.66) x.why.push("corrisponde alla richiesta"); }
+    if (match) { score += match*38; if(match>=0.66) x.why.push("corrisponde alla richiesta"); else if(match<0.34 && intent.kind!=="general") score-=12; }
     if (x.rating!=null) { score += (intent.cheap||intent.maxPrice!=null)?x.rating*2.5:x.rating*5; x.why.push(`valutazione ${x.rating}/5`); }
     if (x.price!=null) {
       const p = Number(x.price);
@@ -572,7 +584,7 @@ app.use((req, res, next) => {
 
 app.get("/api/health", (req, res) => res.json({
   ok: true, version: VERSION,
-  providers: {web:!!process.env.TAVILY_API_KEY,places:!!process.env.GOOGLE_MAPS_API_KEY,flights:!!(process.env.AMADEUS_CLIENT_ID&&process.env.AMADEUS_CLIENT_SECRET)}
+  providers: {web:!!process.env.TAVILY_API_KEY,places:!!process.env.GOOGLE_MAPS_API_KEY,flights:!!(process.env.AMADEUS_CLIENT_ID&&process.env.AMADEUS_CLIENT_SECRET),gemini:!!(process.env.GEMINI_API_KEY||process.env.GOOGLE_GEMINI_API_KEY)}
 }));
 
 app.get("/api/search", async (req, res) => {
@@ -688,262 +700,165 @@ app.post("/api/extract", async (req, res) => {
   }
 });
 
+// ========== PRECISION HELPERS ==========
+function normalizeBarcodeCode(raw) {
+  const code = clean(raw).replace(/[^0-9]/g, "");
+  if (![8,12,13,14].includes(code.length)) return null;
+  // Accept valid EAN/UPC checksums; for unknown 8/12/13/14 digit codes keep the code
+  // because some regional databases contain incomplete/legacy entries.
+  const digits = code.split("").map(Number);
+  if (digits.every(Number.isInteger) && digits.length >= 8) {
+    let sum = 0;
+    for (let i = digits.length - 2, pos = 0; i >= 0; i--, pos++) sum += digits[i] * (pos % 2 ? 1 : 3);
+    const check = (10 - (sum % 10)) % 10;
+    const actual = digits[digits.length - 1];
+    if (check !== actual) return null;
+  }
+  return code;
+}
+
+function parseJsonLoose(text) {
+  const s = String(text || "").trim().replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+  try { return JSON.parse(s); } catch {}
+  const a = s.indexOf("{"); const b = s.lastIndexOf("}");
+  if (a >= 0 && b > a) { try { return JSON.parse(s.slice(a, b + 1)); } catch {} }
+  return null;
+}
+
+function visualSearchQuery(info, fallback="") {
+  const parts = [info.brand, info.model, info.product, info.variant, info.color, info.category]
+    .map(clean).filter(Boolean);
+  const unique=[]; for (const p of parts) if (!unique.some(x=>x.toLowerCase()===p.toLowerCase())) unique.push(p);
+  return unique.join(" ").trim() || clean(info.search_query) || clean(fallback) || "prodotto";
+}
+
+function strictVisualRelevant(text, info) {
+  const t=String(text||"").toLowerCase();
+  const terms=[info.brand,info.model,info.product,info.variant].map(clean).filter(x=>x.length>=3).map(x=>x.toLowerCase());
+  if (!terms.length) return true;
+  const hits=terms.filter(x=>t.includes(x)).length;
+  return hits >= Math.min(2, terms.length) || terms.some(x=>x.length>=6 && t.includes(x));
+}
+
+async function geminiVision(image, description="") {
+  const key=process.env.GEMINI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY;
+  if (!key) return {info:null, error:"GEMINI_API_KEY non configurata"};
+  const match=String(image||"").match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+  if (!match) return {info:null,error:"Formato immagine non valido"};
+  const model=process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const prompt=`Sei il motore di riconoscimento visivo di FINDO. Analizza l'immagine per identificare un prodotto reale da acquistare.
+Non inventare marca o modello. Usa solo dettagli realmente visibili. Leggi attentamente loghi, etichette, numeri modello, EAN/UPC e testo.
+Se il prodotto non è identificabile con precisione, lascia i campi incerti vuoti.
+Descrizione utente: ${clean(description)||"nessuna"}
+Restituisci SOLO JSON valido con questi campi: product, brand, model, variant, category, color, visible_text, barcode, search_query, confidence.
+confidence deve essere un numero 0-1. search_query deve contenere solo termini utili a trovare esattamente lo stesso prodotto.`;
+  const body={contents:[{parts:[{inline_data:{mime_type:match[1],data:match[2]}},{text:prompt}]}],generationConfig:{temperature:0,maxOutputTokens:400,responseMimeType:"application/json"}};
+  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify(body)});
+  if(!r.ok){const msg=await r.text().catch(()=>""); return {info:null,error:`Gemini ${r.status}: ${msg.slice(0,220)}`};}
+  const d=await r.json();
+  const text=d.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join(" ").trim()||"";
+  const info=parseJsonLoose(text);
+  return {info,raw:text,error:info?null:"Risposta Gemini non interpretabile"};
+}
+
+async function lookupBarcodeProduct(code) {
+  const sources=[
+    [`https://world.openfoodfacts.org/api/v2/product/${code}.json`,"Open Food Facts"],
+    [`https://world.openproductsfacts.org/api/v2/product/${code}.json`,"Open Products Facts"],
+    [`https://world.openbeautyfacts.org/api/v2/product/${code}.json`,"Open Beauty Facts"]
+  ];
+  for (const [url,source] of sources) {
+    try {
+      const r=await fetch(url,{headers:{"User-Agent":"FINDO/9.0 barcode-search (contact: findo)"}});
+      if(!r.ok) continue;
+      const d=await r.json();
+      if(d.status===1 && d.product){
+        const p=d.product;
+        return {source,productName:p.product_name_it||p.product_name||p.generic_name_it||p.generic_name||null,brand:p.brands||null,image:p.image_front_url||p.image_url||null,description:p.generic_name_it||p.generic_name||null,categories:p.categories_it||p.categories||null};
+      }
+    } catch {}
+  }
+  return null;
+}
+
+async function exactWebSearch(query, intent, domains=[]) {
+  if(!process.env.TAVILY_API_KEY) return {results:[],answer:null};
+  const body={query,search_depth:"advanced",max_results:12,include_answer:true,include_raw_content:false};
+  if(domains.length) body.include_domains=domains;
+  const r=await fetch("https://api.tavily.com/search",{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${process.env.TAVILY_API_KEY}`},body:JSON.stringify(body)});
+  if(!r.ok) return {results:[],answer:null};
+  const d=await r.json(); const out=[];
+  for(const x of (d.results||[])){
+    const txt=`${x.title||""} ${x.content||""}`;
+    const c=normalize({title:compactDescription(x.title,110),description:compactDescription(x.content,260),url:x.url,source:hostOf(x.url),provider:"Tavily",kind:intent.kind||"product",price:priceOf(txt,intent.kind),rating:ratingOf(txt)});
+    if(kindEnforcement(c,intent)) out.push(c);
+  }
+  return {results:dedupe(out),answer:d.answer||null};
+}
+
 // ── Visual Search: identify image, then search the web for matching products ──
 app.post("/api/visual-search", async (req, res) => {
   try {
     const { image, description } = req.body || {};
-    if (!image && !description) return res.status(400).json({error:"Immagine o descrizione richiesta"});
+    if (!image && !description) return res.status(400).json({error:"Scatta/carica una foto oppure inserisci una descrizione."});
 
-    let searchDesc = clean(description);
-    let aiAnswer = null;
-
-    // Real image understanding through Gemini when GEMINI_API_KEY is configured.
-    // The browser sends a compressed data URL; only the base64 payload is forwarded.
-    if (image) {
-      const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY;
-      if (geminiKey) {
-        const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-        const match = String(image).match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-        if (!match) return res.status(400).json({error:"Formato immagine non valido"});
-        const mimeType = match[1];
-        const data = match[2];
-
-        const prompt = [
-          "Analizza questa foto per una ricerca acquisto.",
-          "Identifica con la massima precisione possibile l'oggetto principale, marca, modello, variante, colore e caratteristiche leggibili.",
-          "Se c'è un testo, codice modello o numero di prodotto visibile, leggilo.",
-          "Rispondi in italiano con una singola riga breve e concreta, senza inventare dettagli."
-        ].join(" ");
-
-        const gr = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-          {
-            method:"POST",
-            headers:{
-              "Content-Type":"application/json",
-              "x-goog-api-key":geminiKey
-            },
-            body:JSON.stringify({
-              contents:[{
-                parts:[
-                  {inline_data:{mime_type:mimeType,data}},
-                  {text:prompt}
-                ]
-              }],
-              generationConfig:{temperature:0.1,maxOutputTokens:250}
-            })
-          }
-        );
-        if (gr.ok) {
-          const gd = await gr.json();
-          aiAnswer = gd.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join(" ").trim() || null;
-          if (aiAnswer) searchDesc = [searchDesc, aiAnswer].filter(Boolean).join(" ").trim();
-        } else {
-          const msg = await gr.text().catch(()=>"");
-          console.warn("Gemini visual search:", gr.status, msg.slice(0,300));
-        }
-      }
+    let info={product:"",brand:"",model:"",variant:"",category:"",color:"",visible_text:"",barcode:"",search_query:"",confidence:0};
+    let visionError=null;
+    if(image){
+      const vr=await geminiVision(image,description);
+      if(vr.info) info={...info,...vr.info}; else visionError=vr.error;
+    }
+    const barcode=normalizeBarcodeCode(info.barcode||"");
+    if(barcode){
+      const p=await lookupBarcodeProduct(barcode);
+      if(p){ info={...info,product:p.productName||info.product,brand:p.brand||info.brand,category:p.categories||info.category}; }
+      const b=await exactWebSearch(`EAN ${barcode} ${visualSearchQuery(info,description)} prezzo Italia dove comprare`,{kind:"product",coreTerms:[barcode,...[info.product,info.brand,info.model].filter(Boolean)],terms:[barcode]},["amazon.it","ebay.it","idealo.it","trovaprezzi.it"]);
+      const ranked=rank(b.results,{kind:"product",coreTerms:[barcode,...[info.product,info.brand,info.model].filter(Boolean)],terms:[barcode],cheap:true,sort:"price"});
+      return res.json({query:visualSearchQuery(info,description),kind:"product",aiAnswer:`Codice ${barcode}${info.product?` · ${info.product}`:""}`,identified:info,barcode,visionError,total:ranked.length,results:ranked});
     }
 
-    if (!searchDesc) searchDesc = "prodotto da identificare";
-    const kind = detect(searchDesc);
-    const intent = parseIntent(searchDesc, kind, null, null);
-    const searchQuery = intentQuery(searchDesc, intent);
-    const itQuery = kind === 'car' || kind === 'motorcycle'
-      ? searchQuery + ' prezzo Italia'
-      : kind === 'product'
-      ? searchQuery + ' dove comprare prezzo Italia'
-      : searchQuery + ' Italia';
-
-    if (process.env.TAVILY_API_KEY) {
-      const r = await fetch("https://api.tavily.com/search", {
-        method:"POST",
-        headers:{
-          "Content-Type":"application/json",
-          "Authorization":`Bearer ${process.env.TAVILY_API_KEY}`
-        },
-        body:JSON.stringify({
-          query:itQuery,
-          search_depth:"basic",
-          max_results:20,
-          include_answer:true,
-          include_raw_content:false
-        })
-      });
-      if (!r.ok) throw new Error(`Tavily ${r.status}`);
-      const d = await r.json();
-      const answer = aiAnswer || d.answer || null;
-      const results = [];
-      for (const x of (d.results||[])) {
-        const candidate = normalize({
-          title:compactDescription(x.title,100),
-          description:compactDescription(x.content,300),
-          url:x.url,
-          source:hostOf(x.url),
-          provider:"Tavily",
-          kind:"web",
-          price:priceOf(`${x.title} ${x.content}`),
-          rating:ratingOf(`${x.title} ${x.content}`)
-        });
-        if (kindEnforcement(candidate,intent)) results.push(candidate);
-      }
-      const ranked = rank(dedupe(results), intent);
-      return res.json({query:searchDesc,kind,aiAnswer:answer,total:ranked.length,results:ranked});
-    }
-
-    return res.json({
-      query:searchDesc,
-      kind,
-      aiAnswer:aiAnswer || "Attiva GEMINI_API_KEY per il riconoscimento automatico della foto.",
-      total:0,
-      results:[]
-    });
-  } catch(e) {
-    console.error("visual-search:", e);
-    res.status(500).json({error:e.message});
-  }
+    const query=visualSearchQuery(info,description);
+    const core=[info.brand,info.model,info.product].map(clean).filter(x=>x.length>=3);
+    const intent={kind:detect(query)==="general"?"product":detect(query),coreTerms:core.length?core:[query],terms:core.length?core:[query],cheap:false,maxPrice:null,near:false,openNow:false,sort:"best"};
+    if(!["product","car","motorcycle"].includes(intent.kind)) intent.kind="product";
+    const domains=["amazon.it","ebay.it","idealo.it","trovaprezzi.it","subito.it","mediaworld.it","unieuro.it"];
+    const searches=[
+      exactWebSearch(`"${query}" prezzo Italia comprare`,intent,domains),
+      exactWebSearch(`${query} recensione specifiche modello`,intent,[])
+    ];
+    const settled=await Promise.all(searches);
+    const all=dedupe(settled.flatMap(x=>x.results));
+    const filtered=all.filter(x=>strictVisualRelevant(`${x.title} ${x.description}`,info) || !core.length);
+    const ranked=rank(filtered,intent);
+    const answer=info.product||info.brand||info.model ? `Ho identificato: ${[info.brand,info.model,info.product,info.variant].filter(Boolean).join(" ")}` : (visionError||"Non riesco a identificare con sufficiente precisione il prodotto. Prova una foto più ravvicinata e nitida.");
+    res.json({query,kind:intent.kind,aiAnswer:answer,identified:info,visionError,total:ranked.length,results:ranked});
+  } catch(e) { console.error("visual-search:",e); res.status(500).json({error:"Ricerca visiva non disponibile in questo momento."}); }
 });
 
-// ── Barcode / EAN lookup: camera -> EAN -> product database -> shopping comparison ──
+// ── Barcode / EAN lookup: camera/photo -> code -> verified product -> offers ──
 app.get("/api/barcode", async (req, res) => {
   try {
-    const rawCode = clean(req.query.code);
-    const code = rawCode.replace(/[^0-9]/g,"");
-    if (!code || !/^\d{8,14}$/.test(code)) {
-      return res.status(400).json({error:"Codice EAN/UPC non valido"});
-    }
-
-    let productName = null;
-    let brand = null;
-    let image = null;
-    let productDescription = null;
-    let categories = null;
-    let aiAnswer = null;
-
-    // Open Food Facts / Open Products Facts: no API key required.
-    const dbUrls = [
-      `https://world.openfoodfacts.org/api/v2/product/${code}.json`,
-      `https://world.openproductsfacts.org/api/v2/product/${code}.json`
+    const code=normalizeBarcodeCode(req.query.code);
+    if(!code) return res.status(400).json({error:"Codice EAN/UPC non valido. Usa 8, 12, 13 o 14 cifre e controlla il codice."});
+    const p=await lookupBarcodeProduct(code);
+    const baseName=[p?.brand,p?.productName].filter(Boolean).join(" ").trim();
+    const intent={kind:"product",original:baseName||code,near:false,openNow:false,cheap:true,expensive:false,maxPrice:null,city:null,terms:[code,...(baseName?baseName.split(/\s+/):[])],coreTerms:[code,...(baseName?baseName.split(/\s+/):[])],sort:"price"};
+    const results=[]; let aiAnswer=null;
+    const queries=[
+      [`EAN ${code} ${baseName} prezzo Italia dove comprare`,["amazon.it","ebay.it","idealo.it","trovaprezzi.it"]],
+      [`"${code}" ${baseName} prezzo`,["mediaworld.it","unieuro.it","eprice.it","subito.it"]]
     ];
-
-    for (const u of dbUrls) {
-      try {
-        const rr = await fetch(u, {headers:{"User-Agent":"FINDO/8.0 barcode-search"}});
-        if (!rr.ok) continue;
-        const pd = await rr.json();
-        if (pd.status === 1 && pd.product) {
-          const p = pd.product;
-          productName = p.product_name_it || p.product_name || p.generic_name_it || p.generic_name || null;
-          brand = p.brands || null;
-          image = p.image_front_url || p.image_url || null;
-          productDescription = p.generic_name_it || p.generic_name || null;
-          categories = p.categories_it || p.categories || null;
-          if (productName) break;
-        }
-      } catch {}
+    if(process.env.TAVILY_API_KEY){
+      const settled=await Promise.all(queries.map(([q,domains])=>exactWebSearch(q,intent,domains)));
+      aiAnswer=settled.find(x=>x.answer)?.answer||null;
+      for(const s of settled) results.push(...s.results);
     }
-
-    const searchBase = [brand,productName,categories].filter(Boolean).join(" ").trim();
-    const query = searchBase
-      ? `${searchBase} EAN ${code} prezzo Italia dove comprare`
-      : `EAN ${code} prodotto prezzo Italia dove comprare`;
-
-    const results = [];
-
-    if (process.env.TAVILY_API_KEY) {
-      const r = await fetch("https://api.tavily.com/search", {
-        method:"POST",
-        headers:{
-          "Content-Type":"application/json",
-          "Authorization":`Bearer ${process.env.TAVILY_API_KEY}`
-        },
-        body:JSON.stringify({
-          query,
-          search_depth:"basic",
-          max_results:20,
-          include_answer:true,
-          include_raw_content:false
-        })
-      });
-      if (r.ok) {
-        const d = await r.json();
-        aiAnswer = d.answer || null;
-        for (const x of (d.results||[])) {
-          const candidate = normalize({
-            title:compactDescription(x.title,110),
-            description:compactDescription(x.content,300),
-            url:x.url,
-            source:hostOf(x.url),
-            provider:"Tavily",
-            kind:"product",
-            price:priceOf(`${x.title} ${x.content}`),
-            rating:ratingOf(`${x.title} ${x.content}`)
-          });
-          if (kindEnforcement(candidate,{kind:"product",coreTerms:[code,...(searchBase?searchBase.split(/\s+/):[])],terms:[code]})) {
-            results.push(candidate);
-          }
-        }
-      }
-    }
-
-    if (productName && process.env.TAVILY_API_KEY) {
-      try {
-        const r2 = await fetch("https://api.tavily.com/search", {
-          method:"POST",
-          headers:{
-            "Content-Type":"application/json",
-            "Authorization":`Bearer ${process.env.TAVILY_API_KEY}`
-          },
-          body:JSON.stringify({
-            query:`${productName} ${brand||""} prezzo migliore Italia`,
-            search_depth:"basic",
-            max_results:15,
-            include_answer:false,
-            include_raw_content:false,
-            include_domains:["amazon.it","ebay.it","idealo.it","trovaprezzi.it"]
-          })
-        });
-        if (r2.ok) {
-          const d2 = await r2.json();
-          for (const x of (d2.results||[])) {
-            results.push(normalize({
-              title:compactDescription(x.title,110),
-              description:compactDescription(x.content,300),
-              url:x.url,
-              source:hostOf(x.url),
-              provider:"Tavily",
-              kind:"product",
-              price:priceOf(`${x.title} ${x.content}`),
-              rating:ratingOf(`${x.title} ${x.content}`)
-            }));
-          }
-        }
-      } catch {}
-    }
-
-    const intent = {
-      kind:"product", original:productName||code, near:false, openNow:false,
-      cheap:true, expensive:false, maxPrice:null, city:null, terms:[productName||code],
-      coreTerms:[productName||code,code], sort:"price", used:false
-    };
-
-    const ranked = rank(dedupe(results), intent);
-    return res.json({
-      code,
-      productName,
-      brand,
-      image,
-      productDescription,
-      categories,
-      kind:"product",
-      aiAnswer,
-      total:ranked.length,
-      results:ranked
-    });
-  } catch(e) {
-    console.error("barcode:", e);
-    res.status(500).json({error:e.message});
-  }
+    let ranked=rank(dedupe(results),intent);
+    // Barcode is an exact identifier: discard results that don't contain the code when code is visible.
+    const exact=ranked.filter(x=>`${x.title} ${x.description}`.includes(code));
+    if(exact.length) ranked=exact;
+    res.json({ok:true,kind:"product",code,productName:p?.productName||null,brand:p?.brand||null,image:p?.image||null,description:p?.description||null,categories:p?.categories||null,source:p?.source||null,aiAnswer:aiAnswer|| (p?`Prodotto identificato: ${[p.brand,p.productName].filter(Boolean).join(" ")}`:`Codice ${code} identificato, ma non presente nei cataloghi FINDO.`),total:ranked.length,results:ranked.slice(0,40)});
+  } catch(e){ console.error("barcode:",e); res.status(500).json({error:"Ricerca barcode non disponibile in questo momento."}); }
 });
 
 app.get("/api/config", (req, res) => res.json({
