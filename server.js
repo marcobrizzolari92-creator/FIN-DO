@@ -2,9 +2,9 @@ import express from "express";
 import dotenv from "dotenv";
 import crypto from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-// Note: createReadStream removed — Vercel serves public/ from CDN, express.static handles local dev
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { INDEX_HTML } from "./index-html.js";
 
 dotenv.config();
 
@@ -866,12 +866,14 @@ app.get("/api/config", (req, res) => res.json({
 // SPA catch-all for client-side routes — serves index.html for any non-API, non-static path
 // On Vercel, the CDN serves /index.html from public/ directly;
 // this catches /search, /about, etc. for client-side routing
+// ── SPA catch-all: serve index.html for all non-API routes ──
+// The HTML is imported from index-html.js (bundled with the function)
+// so it works even when Vercel doesn't serve public/ from CDN.
 app.get("*", (req, res) => {
-  // Only serve the SPA HTML for non-API routes
   if (req.path.startsWith("/api/")) {
     return res.status(404).json({error: "Endpoint non trovato"});
   }
-  res.sendFile(join(__dirname, "public", "index.html"));
+  res.type("html").send(INDEX_HTML);
 });
 
 // Vercel serverless export
