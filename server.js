@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.1.0-PRO";
+const VERSION = "10.2.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -782,10 +782,17 @@ function parseJsonLoose(text) {
 }
 
 function visualSearchQuery(info, fallback="") {
-  const parts = [info.brand, info.model, info.product, info.variant, info.color, info.category]
-    .map(clean).filter(Boolean);
-  const unique=[]; for (const p of parts) if (!unique.some(x=>x.toLowerCase()===p.toLowerCase())) unique.push(p);
-  return unique.join(" ").trim() || clean(info.search_query) || clean(fallback) || "prodotto";
+  const verified = [info.brand, info.model, info.variant].map(clean).filter(Boolean);
+  const product = clean(info.product);
+  const aiQuery = clean(info.search_query);
+  const unique=[];
+  for (const p of [...verified, product, aiQuery]) {
+    if (!p) continue;
+    if (!unique.some(x=>x.toLowerCase()===p.toLowerCase())) unique.push(p);
+  }
+  // Keep the most reliable identifiers first. The AI-generated query is useful
+  // as an additional shopping phrase, not as a replacement for model/brand.
+  return unique.join(" ").trim() || clean(fallback) || "prodotto";
 }
 
 function strictVisualRelevant(text, info) {
@@ -917,27 +924,49 @@ app.post("/api/visual-search", async (req, res) => {
     }
 
     const query=visualSearchQuery(info,description);
-    const core=[info.brand,info.model,info.product].map(clean).filter(x=>x.length>=3);
-    const intent={kind:detect(query)==="general"?"product":detect(query),coreTerms:core.length?core:[query],terms:core.length?core:[query],cheap:false,maxPrice:null,near:false,openNow:false,sort:"best"};
+    const searchPhrase=clean(info.search_query) || query;
+    const core=[info.brand,info.model,info.product,info.variant].map(clean).filter(x=>x.length>=3);
+    const strong=[info.brand,info.model,info.variant].map(clean).filter(x=>x.length>=3);
+    const intent={kind:detect(query)==="general"?"product":detect(query),coreTerms:strong.length?strong:(core.length?core:[query]),terms:core.length?core:[query],cheap:false,maxPrice:null,near:false,openNow:false,sort:"best"};
     if(!["product","car","motorcycle"].includes(intent.kind)) intent.kind="product";
     const domains=["amazon.it","ebay.it","idealo.it","trovaprezzi.it","subito.it","mediaworld.it","unieuro.it"];
-    // Purchase-first: never spend a visual-search request on reviews/descriptions.
-    // First query the main Italian shops, then use a broader shopping query only if needed.
+    // PRO visual search: run independent exact shopping variants in parallel.
+    // This avoids relying on one wording and greatly improves model/variant recall.
+    const q1=strong.length ? strong.join(" ") : searchPhrase;
+    const q2=searchPhrase;
+    const q3=[info.product,description].map(clean).filter(Boolean).join(" ");
     const searches=[
-      exactWebSearch(`"${query}" prezzo comprare acquisto Italia`,intent,domains),
-      exactWebSearch(`${query} comprare prezzo negozio online Italia`,intent,[])
+      exactWebSearch(`"${q1}" prezzo comprare Italia`,intent,domains),
+      exactWebSearch(`"${q2}" acquisto prezzo Italia`,intent,domains),
+      exactWebSearch(`${q3} comprare negozio online Italia`,intent,[])
     ];
-    const settled=await Promise.all(searches);
-    const all=dedupe(settled.flatMap(x=>x?.results||[]));
-    // If AI recognition is weak, still use the user's own description as a safe fallback.
-    if(!all.length && description){
+    const settled=await Promise.allSettled(searches);
+    const all=dedupe(settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
+    // Only apply strict filtering when it actually produces matches. This prevents
+    // a correct listing from being discarded because a marketplace title is abbreviated.
+    const strict=all.filter(x=>strictVisualRelevant(`${x.title} ${x.description}`,{...info,model:info.model||info.search_query}));
+    const candidates=strict.length ? strict : all;
+    if(!candidates.length && description){
       const fb=await exactWebSearch(`${description} prezzo comprare Italia`,intent,[]);
-      all.push(...(fb.results||[]));
+      candidates.push(...(fb.results||[]));
     }
-    const filtered=all.filter(x=>strictVisualRelevant(`${x.title} ${x.description}`,info) || !core.length);
-    const ranked=rank(filtered,intent);
+    const ranked=rank(candidates,intent);
+    // Extra visual precision: exact model/variant/brand matches rise above generic
+    // family/category listings after the normal multi-factor ranking.
+    const lower=(x)=>String(x||"").toLowerCase();
+    for(const r of ranked){
+      const text=lower(`${r.title} ${r.description}`);
+      let boost=0;
+      if(info.model && text.includes(lower(info.model))) boost+=24;
+      if(info.brand && text.includes(lower(info.brand))) boost+=14;
+      if(info.variant && text.includes(lower(info.variant))) boost+=10;
+      if(info.product && text.includes(lower(info.product))) boost+=8;
+      r.score=Math.min(100,(Number(r.score)||0)+boost);
+      if(boost>=24 && !r.why.includes("modello identificato")) r.why.unshift("modello identificato");
+    }
+    ranked.sort((a,b)=>(b.score||0)-(a.score||0));
     const answer=ranked.length
-      ? `Ho identificato ${[info.brand,info.model,info.product,info.variant].filter(Boolean).join(" ") || "il prodotto"}. Ho cercato dove acquistarlo e ordinato le offerte trovate.`
+      ? `Ho identificato ${[info.brand,info.model,info.variant,info.product].filter(Boolean).join(" ") || "il prodotto"}. Ho confrontato le offerte e messo in cima quelle più corrispondenti al modello fotografato.`
       : (info.product||info.brand||info.model
         ? `Ho identificato: ${[info.brand,info.model,info.product,info.variant].filter(Boolean).join(" ")}. Non ho trovato ancora un'offerta affidabile: prova una foto più ravvicinata oppure aggiungi marca/modello.`
         : (visionError ? "Non ho identificato il prodotto con sufficiente precisione. Prova una foto più nitida e ravvicinata, oppure aggiungi marca/modello." : "Non riesco a identificare con sufficiente precisione il prodotto."));
