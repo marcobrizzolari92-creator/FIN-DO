@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "9.1.0";
+const VERSION = "9.2.0";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -358,9 +358,9 @@ async function tavilySearch(q, intent={}, plan=null) {
 
   const body = {
     query: itQuery,
-    search_depth: "advanced",
-    max_results: plan ? 10 : 20,
-    include_answer: true,
+    search_depth: "basic",
+    max_results: plan ? 7 : 10,
+    include_answer: false,
     include_raw_content: false
   };
   if (plan?.domains?.length) body.include_domains = plan.domains;
@@ -371,7 +371,7 @@ async function tavilySearch(q, intent={}, plan=null) {
   });
   if (!r.ok) { const msg = await r.text().catch(() => ""); throw new Error(`Tavily ${r.status}${msg ? `: ${msg.slice(0,180)}` : ""}`); }
   const d = await r.json();
-  const aiAnswer = d.answer || null;
+  const aiAnswer = null;
   const out = [];
   for (const x of (d.results || [])) {
     const source = plan?.name || hostOf(x.url);
@@ -802,7 +802,7 @@ async function lookupBarcodeProduct(code) {
 
 async function exactWebSearch(query, intent, domains=[]) {
   if(!process.env.TAVILY_API_KEY) return {results:[],answer:null};
-  const body={query,search_depth:"advanced",max_results:12,include_answer:true,include_raw_content:false};
+  const body={query,search_depth:"basic",max_results:8,include_answer:false,include_raw_content:false};
   if(domains.length) body.include_domains=domains;
   const r=await fetch("https://api.tavily.com/search",{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${process.env.TAVILY_API_KEY}`},body:JSON.stringify(body)});
   if(!r.ok) return {results:[],answer:null};
@@ -812,7 +812,7 @@ async function exactWebSearch(query, intent, domains=[]) {
     const c=normalize({title:compactDescription(x.title,110),description:compactDescription(x.content,260),url:x.url,source:hostOf(x.url),provider:"Tavily",kind:intent.kind||"product",price:priceOf(txt,intent.kind),rating:ratingOf(txt)});
     if(kindEnforcement(c,intent)) out.push(c);
   }
-  return {results:dedupe(out),answer:d.answer||null};
+  return {results:dedupe(out),answer:null};
 }
 
 // ── Visual Search: identify image, then search the web for matching products ──
@@ -841,15 +841,21 @@ app.post("/api/visual-search", async (req, res) => {
     const intent={kind:detect(query)==="general"?"product":detect(query),coreTerms:core.length?core:[query],terms:core.length?core:[query],cheap:false,maxPrice:null,near:false,openNow:false,sort:"best"};
     if(!["product","car","motorcycle"].includes(intent.kind)) intent.kind="product";
     const domains=["amazon.it","ebay.it","idealo.it","trovaprezzi.it","subito.it","mediaworld.it","unieuro.it"];
+    // Purchase-first: never spend a visual-search request on reviews/descriptions.
+    // First query the main Italian shops, then use a broader shopping query only if needed.
     const searches=[
-      exactWebSearch(`"${query}" prezzo Italia comprare`,intent,domains),
-      exactWebSearch(`${query} recensione specifiche modello`,intent,[])
+      exactWebSearch(`"${query}" prezzo comprare acquisto Italia`,intent,domains),
+      exactWebSearch(`${query} comprare prezzo negozio online Italia`,intent,[])
     ];
     const settled=await Promise.all(searches);
     const all=dedupe(settled.flatMap(x=>x.results));
     const filtered=all.filter(x=>strictVisualRelevant(`${x.title} ${x.description}`,info) || !core.length);
     const ranked=rank(filtered,intent);
-    const answer=info.product||info.brand||info.model ? `Ho identificato: ${[info.brand,info.model,info.product,info.variant].filter(Boolean).join(" ")}` : (visionError||"Non riesco a identificare con sufficiente precisione il prodotto. Prova una foto più ravvicinata e nitida.");
+    const answer=ranked.length
+      ? `Ho identificato ${[info.brand,info.model,info.product,info.variant].filter(Boolean).join(" ") || "il prodotto"}. Ho cercato dove acquistarlo e ordinato le offerte trovate.`
+      : (info.product||info.brand||info.model
+        ? `Ho identificato: ${[info.brand,info.model,info.product,info.variant].filter(Boolean).join(" ")}. Non ho trovato ancora un'offerta affidabile: prova una foto più ravvicinata oppure aggiungi marca/modello.`
+        : (visionError||"Non riesco a identificare con sufficiente precisione il prodotto. Prova una foto più ravvicinata e nitida."));
     res.json({query,kind:intent.kind,aiAnswer:answer,identified:info,visionError,total:ranked.length,results:ranked});
   } catch(e) { console.error("visual-search:",e); res.status(500).json({error:"Ricerca visiva non disponibile in questo momento."}); }
 });
