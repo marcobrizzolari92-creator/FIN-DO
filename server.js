@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.0.0-PRO";
+const VERSION = "10.1.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -575,6 +575,50 @@ function compareItems(ids) {
   return items;
 }
 
+
+/* ========== UNIVERSAL SEARCH SECTIONS ========== */
+const SEARCH_SECTIONS = {
+  shopping: {label:"Shopping", icon:"🛍️", kind:"product", suffix:" comprare prezzo online Italia", domains:["amazon.it","ebay.it","idealo.it","trovaprezzi.it","mediaworld.it","unieuro.it","eprice.it","subito.it"]},
+  experiences: {label:"Esperienze", icon:"🎟️", kind:"general", suffix:" esperienze attività cose da fare Italia", domains:["getyourguide.it","viator.com","tripadvisor.it","feverup.com"]},
+  places: {label:"Luoghi", icon:"📍", kind:"general", suffix:" vicino a me luogo attività Italia", domains:[]},
+  travel: {label:"Viaggi", icon:"✈️", kind:"general", suffix:" viaggio hotel volo offerte Italia", domains:["booking.com","skyscanner.it","trivago.it","volagratis.com"]},
+  services: {label:"Servizi", icon:"🛠️", kind:"general", suffix:" servizio professionista Italia", domains:[]},
+  jobs: {label:"Lavoro", icon:"💼", kind:"job", suffix:" offerta lavoro Italia", domains:["indeed.it","infojobs.it","linkedin.com","monster.it"]},
+  homes: {label:"Immobili", icon:"🏠", kind:"realestate", suffix:" vendita affitto Italia", domains:["immobiliare.it","idealista.it","casa.it","subito.it"]}
+};
+function sectionSpec(section){ return SEARCH_SECTIONS[clean(section).toLowerCase()] || null; }
+function sectionSearchQuery(q, spec){ return `${q} ${spec?.suffix||''}`.replace(/\s+/g,' ').trim(); }
+async function searchSection(q, section, lat, lon){
+  const spec=sectionSpec(section);
+  if(!spec) return {results:[],kind:"general",aiAnswer:null};
+  let kind=spec.kind;
+  // Preserve precise detected types inside a compatible section.
+  const detected=detect(q);
+  if(section==='shopping' && ['car','motorcycle','product'].includes(detected)) kind=detected;
+  if(section==='travel' && ['hotel','flight'].includes(detected)) kind=detected;
+  if(section==='places' && ['restaurant','hotel','pharmacy','gas'].includes(detected)) kind=detected;
+  const intent=parseIntent(q,kind,lat,lon);
+  intent.section=section;
+  let webResult={results:[],aiAnswer:null};
+  if(section==='shopping') {
+    if(kind==='product'||kind==='car'||kind==='motorcycle') webResult=await multiSourceWeb(q,intent);
+    else webResult=await tavilySearch(sectionSearchQuery(q,spec),intent,{name:"Shopping Web",domains:spec.domains});
+  } else if(section==='jobs'||section==='homes') {
+    webResult=await multiSourceWeb(q,intent);
+  } else {
+    webResult=await tavilySearch(sectionSearchQuery(q,spec),intent,{name:spec.label,domains:spec.domains});
+  }
+  let raw=[...(webResult.results||[])];
+  if(section==='places' && lat!=null && lon!=null){
+    try{ raw.push(...await places(q,lat,lon,intent)); }catch{}
+  }
+  if(section==='travel' && detected==='flight'){
+    try{ raw.push(...await flights(q)); }catch{}
+  }
+  const filtered=raw.filter(x=>kindEnforcement(x,intent));
+  return {results:rank(dedupe(filtered),intent),kind,aiAnswer:webResult.aiAnswer||null,intent};
+}
+
 /* ========== ROUTES ========== */
 app.use((req, res, next) => {
   const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
@@ -609,35 +653,53 @@ app.get("/api/health", (req, res) => res.json({
 
 app.get("/api/search", async (req, res) => {
   const q = clean(req.query.q), lat = req.query.lat, lon = req.query.lon;
+  const section = clean(req.query.section).toLowerCase();
   if (!q) return res.status(400).json({error:"Inserisci cosa stai cercando."});
-  const kind = detect(q);
+  const detectedKind = detect(q);
+  const initialSection = section || ({product:"shopping",car:"shopping",motorcycle:"shopping",restaurant:"places",hotel:"travel",flight:"travel",job:"jobs",realestate:"homes",pharmacy:"services",gas:"services"}[detectedKind] || "shopping");
+  const spec = sectionSpec(initialSection);
+
+  // Universal mode: a general query opens on Shopping first, while the user can
+  // switch instantly to Experiences, Places, Travel, Services, Jobs or Homes.
+  if (spec) {
+    const cacheKey = JSON.stringify([q,lat,lon,initialSection]);
+    const cached=cacheGet(cacheKey);
+    if(cached) return res.json({...cached,cached:true});
+    try {
+      const out=await searchSection(q,initialSection,lat,lon);
+      const intent=out.intent || parseIntent(q,out.kind||detectedKind,lat,lon);
+      intent.section=initialSection;
+      const payload={results:out.results||[],aiAnswer:out.aiAnswer||null,intent,section:initialSection,sectionLabel:spec.label,sectionIcon:spec.icon,availableSections:Object.entries(SEARCH_SECTIONS).map(([id,v])=>({id,label:v.label,icon:v.icon}))};
+      recordPriceHistory(payload.results);
+      cacheSet(cacheKey,payload);
+      return res.json(payload);
+    } catch(e) {
+      console.error("section search:",section,e);
+      return res.status(502).json({error:"La ricerca non è riuscita. Riprova tra qualche secondo."});
+    }
+  }
+
+  const kind = detectedKind;
   const intent = parseIntent(q, kind, lat, lon);
   const cacheKey = JSON.stringify([q, lat, lon, intent]);
   const cached = cacheGet(cacheKey);
   if (cached) return res.json({...cached, cached:true});
 
   const shouldSearchPlaces = ["restaurant","hotel","pharmacy","gas","general"].includes(kind);
-
   const settled = await Promise.allSettled([
     multiSourceWeb(q, intent),
     shouldSearchPlaces ? places(q, lat, lon, intent) : Promise.resolve([]),
     kind === 'flight' ? flights(q) : Promise.resolve([])
   ]);
-
   const webResult = settled[0].status==='fulfilled' ? settled[0].value : { results:[], aiAnswer:null };
   const raw = dedupe([
     ...webResult.results,
     ...(settled[1].status==='fulfilled'?settled[1].value:[]),
     ...(settled[2].status==='fulfilled'?settled[2].value:[])
   ]);
-
   const filtered = raw.filter(x => kindEnforcement(x, intent));
   const results = rank(filtered, intent);
-
-  // Record price history for all results with prices
   recordPriceHistory(results);
-
-  // Extract detailed data from top URLs
   const topUrls = results.slice(0,3).map(r => r.url).filter(u => u && !u.includes('google.com/maps'));
   let extractedData = [];
   if (topUrls.length && (kind==='car'||kind==='motorcycle'||kind==='product'||kind==='realestate')) {
@@ -646,47 +708,21 @@ app.get("/api/search", async (req, res) => {
       for (const ext of extracts) {
         const existing = results.find(r => r.url === ext.url);
         if (existing && ext.content) {
-          // Enrich existing result with extracted data
-          const ep = priceOf(ext.content, kind);
-          if (ep != null && existing.price == null) existing.price = ep;
-          const er = ratingOf(ext.content);
-          if (er != null && existing.rating == null) existing.rating = er;
-          const km = ext.content.match(/(\d{1,3}(?:[., ]?\d{3})*)\s*km/i);
-          if (km && existing.mileage == null) existing.mileage = Number(km[1].replace(/[. ]/g,'').replace(',','.'));
-          const yr = ext.content.match(/\b(20\d{2})\b/);
-          if (yr && existing.year == null) existing.year = Number(yr[1]);
-          const fl = ext.content.match(/\b(diesel|benzina|elettrica|elettrico|gpl|metano|hybrid|ibrida|ibrido)\b/i);
-          if (fl && !existing.fuel) existing.fuel = fl[1].toLowerCase();
-          existing.extractedContent = ext.content.slice(0, 500);
+          const ep = priceOf(ext.content, kind); if (ep != null && existing.price == null) existing.price = ep;
+          const er = ratingOf(ext.content); if (er != null && existing.rating == null) existing.rating = er;
+          const km = ext.content.match(/(\d{1,3}(?:[., ]?\d{3})*)\s*km/i); if (km && existing.mileage == null) existing.mileage = Number(km[1].replace(/[. ]/g,'').replace(',','.'));
+          const yr = ext.content.match(/\b(20\d{2})\b/); if (yr && existing.year == null) existing.year = Number(yr[1]);
+          const fl = ext.content.match(/\b(diesel|benzina|elettrica|elettrico|gpl|metano|hybrid|ibrida|ibrido)\b/i); if (fl && !existing.fuel) existing.fuel = fl[1].toLowerCase();
+          existing.extractedContent = ext.content.slice(0,500);
         }
       }
-    } catch(e) { /* Extract failures are non-critical */ }
+    } catch {}
   }
-
-  const warnings = settled.filter(x => x.status==='rejected').map(x => x.reason?.message||'provider error');
-
-  const out = {
-    query: q, kind, aiAnswer: webResult.aiAnswer,
-    total: results.length,
-    intent: {
-      near:intent.near,cheap:intent.cheap,expensive:intent.expensive,
-      maxPrice:intent.maxPrice,maxMileage:intent.maxMileage,minYear:intent.minYear,
-      fuel:intent.fuel,openNow:intent.openNow,city:intent.city,used:intent.used,
-      terms:intent.terms,coreTerms:intent.coreTerms,sort:intent.sort
-    },
-    results,
-    providers: {
-      web:!!process.env.TAVILY_API_KEY,
-      places:!!(process.env.GOOGLE_MAPS_API_KEY&&lat!=null&&lon!=null),
-      flights:!!(process.env.AMADEUS_CLIENT_ID&&process.env.AMADEUS_CLIENT_SECRET)
-    },
-    warnings
-  };
-  cacheSet(cacheKey, out);
-  res.json(out);
+  const payload={results:rank(results,intent),aiAnswer:webResult.aiAnswer||null,intent,section:null,availableSections:Object.entries(SEARCH_SECTIONS).map(([id,v])=>({id,label:v.label,icon:v.icon}))};
+  cacheSet(cacheKey,payload);
+  res.json(payload);
 });
 
-// Price history endpoint
 app.get("/api/price-history", (req, res) => {
   const url = clean(req.query.url);
   if (!url) return res.status(400).json({error:"URL richiesto"});
@@ -768,7 +804,7 @@ async function geminiVision(image, description="") {
   const model=process.env.GEMINI_MODEL || "gemini-3.6-flash";
   // PRO: output intentionally tiny. Large structured schemas can consume the output
   // budget before the JSON is complete and trigger MAX_TOKENS.
-  const prompt=`FINDO: identifica il prodotto nella foto per trovarlo in vendita. Rispondi SOLO con un singolo JSON valido, senza markdown e senza testo fuori dal JSON. Usa solo dati realmente visibili/riconoscibili, non inventare. Campi obbligatori: product, brand, model, variant, barcode, search_query, confidence. Tutti i valori testuali devono essere stringhe (vuote se ignoti); confidence è un numero 0..1. search_query massimo 8 parole, solo marca/modello/codice/variante affidabili. Se non riconosci il prodotto, lascia i campi vuoti. Descrizione utente: ${clean(description)||"nessuna"}`;
+  const prompt=`FINDO PRO: identifica ESATTAMENTE l'oggetto nella foto per trovarlo in vendita. Prima leggi ogni dettaglio visibile: logo/marca, scritte, modello, sigle, numeri, EAN/UPC, variante, confezione e forma. Distingui il modello preciso dalla sola famiglia del prodotto. NON inventare e non completare sigle a memoria. Se una parte non è leggibile lasciala vuota. Rispondi SOLO con un singolo JSON valido, senza markdown e senza testo fuori dal JSON. Campi: product, brand, model, variant, barcode, search_query, confidence. Testi come stringhe; confidence 0..1. search_query massimo 8 parole e deve contenere solo gli elementi più affidabili per una ricerca di acquisto. Descrizione utente: ${clean(description)||"nessuna"}`;
   const endpoint=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const request=async (maxTokens, structured=false)=>{
     const generationConfig={temperature:0,maxOutputTokens:maxTokens};
@@ -858,7 +894,18 @@ app.post("/api/visual-search", async (req, res) => {
     let visionError=null;
     if(image){
       const vr=await geminiVision(image,description);
-      if(vr.info) info={...info,...vr.info}; else visionError=vr.error;
+      if(vr.info) {
+        info={...info,...vr.info};
+        // Secondo passaggio solo quando il riconoscimento è debole: chiede a Gemini
+        // di verificare modello/sigla/variante senza raddoppiare il costo per le foto già chiare.
+        if(Number(vr.info.confidence||0)<0.82 || (!vr.info.model && !vr.info.product)) {
+          const vr2=await geminiVision(image,`${description||"nessuna descrizione"}. Verifica soprattutto marca, modello esatto, sigla e variante; non usare nomi generici.`);
+          if(vr2.info && Number(vr2.info.confidence||0)>=Number(vr.info.confidence||0)) {
+            for(const k of ["product","brand","model","variant","barcode","search_query"]) if(clean(vr2.info[k])) info[k]=clean(vr2.info[k]);
+            info.confidence=Number(vr2.info.confidence||info.confidence||0);
+          }
+        }
+      } else visionError=vr.error;
     }
     const barcode=normalizeBarcodeCode(info.barcode||"");
     if(barcode){
