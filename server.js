@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "9.0.0";
+const VERSION = "9.1.0";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -582,6 +582,26 @@ app.use((req, res, next) => {
   next();
 });
 
+
+// ── Lightweight learning: anonymous preference statistics sent by the client ──
+app.post("/api/learn", (req,res)=>{
+  try {
+    const {events=[]}=req.body||{};
+    if(!Array.isArray(events)) return res.status(400).json({error:"events non valido"});
+    const db=loadDB(); db.learning=db.learning||{sources:{},kinds:{},terms:{},updated:0};
+    for(const ev of events.slice(0,100)){
+      const type=clean(ev.type); const source=clean(ev.source).toLowerCase(); const kind=clean(ev.kind).toLowerCase();
+      const delta=type==="negative"?-1:type==="positive"?1:0.25;
+      if(source) db.learning.sources[source]=(db.learning.sources[source]||0)+delta;
+      if(kind) db.learning.kinds[kind]=(db.learning.kinds[kind]||0)+delta;
+      for(const term of String(ev.term||"").toLowerCase().split(/\s+/).filter(x=>x.length>=3).slice(0,8)) db.learning.terms[term]=(db.learning.terms[term]||0)+delta;
+    }
+    db.learning.updated=Date.now();
+    saveDB(db);
+    res.json({ok:true});
+  } catch(e){ res.status(500).json({error:"Apprendimento non disponibile"}); }
+});
+
 app.get("/api/health", (req, res) => res.json({
   ok: true, version: VERSION,
   providers: {web:!!process.env.TAVILY_API_KEY,places:!!process.env.GOOGLE_MAPS_API_KEY,flights:!!(process.env.AMADEUS_CLIENT_ID&&process.env.AMADEUS_CLIENT_SECRET),gemini:!!(process.env.GEMINI_API_KEY||process.env.GOOGLE_GEMINI_API_KEY)}
@@ -742,23 +762,22 @@ function strictVisualRelevant(text, info) {
 
 async function geminiVision(image, description="") {
   const key=process.env.GEMINI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY;
-  if (!key) return {info:null, error:"GEMINI_API_KEY non configurata"};
+  if(!key) return {info:null,error:"GEMINI_API_KEY non configurata"};
   const match=String(image||"").match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-  if (!match) return {info:null,error:"Formato immagine non valido"};
-  const model=process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  const prompt=`Sei il motore di riconoscimento visivo di FINDO. Analizza l'immagine per identificare un prodotto reale da acquistare.
-Non inventare marca o modello. Usa solo dettagli realmente visibili. Leggi attentamente loghi, etichette, numeri modello, EAN/UPC e testo.
-Se il prodotto non è identificabile con precisione, lascia i campi incerti vuoti.
-Descrizione utente: ${clean(description)||"nessuna"}
-Restituisci SOLO JSON valido con questi campi: product, brand, model, variant, category, color, visible_text, barcode, search_query, confidence.
-confidence deve essere un numero 0-1. search_query deve contenere solo termini utili a trovare esattamente lo stesso prodotto.`;
-  const body={contents:[{parts:[{inline_data:{mime_type:match[1],data:match[2]}},{text:prompt}]}],generationConfig:{temperature:0,maxOutputTokens:400,responseMimeType:"application/json"}};
-  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify(body)});
-  if(!r.ok){const msg=await r.text().catch(()=>""); return {info:null,error:`Gemini ${r.status}: ${msg.slice(0,220)}`};}
-  const d=await r.json();
-  const text=d.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join(" ").trim()||"";
-  const info=parseJsonLoose(text);
-  return {info,raw:text,error:info?null:"Risposta Gemini non interpretabile"};
+  if(!match) return {info:null,error:"Formato immagine non valido"};
+  const model=process.env.GEMINI_MODEL || "gemini-3.6-flash";
+  const schema={type:"object",properties:{product:{type:"string"},brand:{type:"string"},model:{type:"string"},variant:{type:"string"},category:{type:"string"},color:{type:"string"},visible_text:{type:"string"},barcode:{type:"string"},search_query:{type:"string"},confidence:{type:"number",minimum:0,maximum:1}},required:["product","brand","model","variant","category","color","visible_text","barcode","search_query","confidence"],additionalProperties:false};
+  const prompt=`Sei il motore di riconoscimento visivo di FINDO. Identifica un prodotto reale per una ricerca di acquisto precisa. NON inventare marca, modello, codice o caratteristiche: se un dato non è chiaramente leggibile o riconoscibile, lascialo vuoto. Analizza logo, etichette, testo, numero modello, EAN/UPC, packaging e dettagli distintivi. Se compare un barcode, riportalo solo se le cifre sono realmente leggibili. search_query deve contenere SOLO termini affidabili per trovare lo stesso prodotto, privilegiando marca + modello/codice + variante. confidence è 0..1. Descrizione utente: ${clean(description)||"nessuna"}`;
+  const body={contents:[{parts:[{inline_data:{mime_type:match[1],data:match[2]}},{text:prompt}]}],generationConfig:{temperature:0,maxOutputTokens:700,responseMimeType:"application/json",responseJsonSchema:schema}};
+  const endpoint=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  let r;
+  try{r=await fetch(endpoint,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify(body)})}catch(e){return {info:null,error:`Connessione Gemini non riuscita: ${e.message}`}}
+  if(!r.ok){const msg=await r.text().catch(()=>""); try{const retry={...body,generationConfig:{temperature:0,maxOutputTokens:700,responseMimeType:"application/json"}}; r=await fetch(endpoint,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify(retry)}); if(!r.ok)return {info:null,error:`Gemini ${r.status}: ${msg.slice(0,300)}`}}catch{return {info:null,error:`Gemini ${r.status}: ${msg.slice(0,300)}`}}}
+  const d=await r.json().catch(()=>null); const parts=d?.candidates?.[0]?.content?.parts||[]; const text=parts.map(p=>typeof p.text==="string"?p.text:"").join(" ").trim();
+  let info=parseJsonLoose(text); if(!info){for(const p of parts){if(p?.json&&typeof p.json==="object"){info=p.json;break} if(p?.structuredOutput&&typeof p.structuredOutput==="object"){info=p.structuredOutput;break}}}
+  if(!info||typeof info!=="object"){const reason=d?.candidates?.[0]?.finishReason||d?.promptFeedback?.blockReason||"JSON non disponibile";return {info:null,raw:text,error:`Risposta Gemini non interpretabile (${reason})`}}
+  for(const k of ["product","brand","model","variant","category","color","visible_text","barcode","search_query"])info[k]=clean(info[k]); info.confidence=Math.max(0,Math.min(1,Number(info.confidence)||0));
+  return {info,raw:text,error:null};
 }
 
 async function lookupBarcodeProduct(code) {
