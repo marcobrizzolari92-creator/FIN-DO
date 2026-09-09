@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "9.2.0";
+const VERSION = "10.0.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -766,20 +766,48 @@ async function geminiVision(image, description="") {
   const match=String(image||"").match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if(!match) return {info:null,error:"Formato immagine non valido"};
   const model=process.env.GEMINI_MODEL || "gemini-3.6-flash";
-  const schema={type:"object",properties:{product:{type:"string"},brand:{type:"string"},model:{type:"string"},variant:{type:"string"},category:{type:"string"},color:{type:"string"},visible_text:{type:"string"},barcode:{type:"string"},search_query:{type:"string"},confidence:{type:"number",minimum:0,maximum:1}},required:["product","brand","model","variant","category","color","visible_text","barcode","search_query","confidence"],additionalProperties:false};
-  const prompt=`Sei il motore di riconoscimento visivo di FINDO. Identifica un prodotto reale per una ricerca di acquisto precisa. NON inventare marca, modello, codice o caratteristiche: se un dato non è chiaramente leggibile o riconoscibile, lascialo vuoto. Analizza logo, etichette, testo, numero modello, EAN/UPC, packaging e dettagli distintivi. Se compare un barcode, riportalo solo se le cifre sono realmente leggibili. search_query deve contenere SOLO termini affidabili per trovare lo stesso prodotto, privilegiando marca + modello/codice + variante. confidence è 0..1. Descrizione utente: ${clean(description)||"nessuna"}`;
-  const body={contents:[{parts:[{inline_data:{mime_type:match[1],data:match[2]}},{text:prompt}]}],generationConfig:{temperature:0,maxOutputTokens:700,responseMimeType:"application/json",responseJsonSchema:schema}};
+  // PRO: output intentionally tiny. Large structured schemas can consume the output
+  // budget before the JSON is complete and trigger MAX_TOKENS.
+  const prompt=`FINDO: identifica il prodotto nella foto per trovarlo in vendita. Rispondi SOLO con un singolo JSON valido, senza markdown e senza testo fuori dal JSON. Usa solo dati realmente visibili/riconoscibili, non inventare. Campi obbligatori: product, brand, model, variant, barcode, search_query, confidence. Tutti i valori testuali devono essere stringhe (vuote se ignoti); confidence è un numero 0..1. search_query massimo 8 parole, solo marca/modello/codice/variante affidabili. Se non riconosci il prodotto, lascia i campi vuoti. Descrizione utente: ${clean(description)||"nessuna"}`;
   const endpoint=`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const request=async (maxTokens, structured=false)=>{
+    const generationConfig={temperature:0,maxOutputTokens:maxTokens};
+    if(structured){ generationConfig.responseMimeType="application/json"; generationConfig.responseJsonSchema={type:"object",properties:{product:{type:"string"},brand:{type:"string"},model:{type:"string"},variant:{type:"string"},barcode:{type:"string"},search_query:{type:"string"},confidence:{type:"number",minimum:0,maximum:1}},required:["product","brand","model","variant","barcode","search_query","confidence"],additionalProperties:false}; }
+    const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),20000);
+    try{
+      return await fetch(endpoint,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},signal:controller.signal,body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:match[1],data:match[2]}},{text:prompt}]}],generationConfig})});
+    } finally { clearTimeout(timer); }
+  };
   let r;
-  try{r=await fetch(endpoint,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify(body)})}catch(e){return {info:null,error:`Connessione Gemini non riuscita: ${e.message}`}}
-  if(!r.ok){const msg=await r.text().catch(()=>""); try{const retry={...body,generationConfig:{temperature:0,maxOutputTokens:700,responseMimeType:"application/json"}}; r=await fetch(endpoint,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify(retry)}); if(!r.ok)return {info:null,error:`Gemini ${r.status}: ${msg.slice(0,300)}`}}catch{return {info:null,error:`Gemini ${r.status}: ${msg.slice(0,300)}`}}}
-  const d=await r.json().catch(()=>null); const parts=d?.candidates?.[0]?.content?.parts||[]; const text=parts.map(p=>typeof p.text==="string"?p.text:"").join(" ").trim();
-  let info=parseJsonLoose(text); if(!info){for(const p of parts){if(p?.json&&typeof p.json==="object"){info=p.json;break} if(p?.structuredOutput&&typeof p.structuredOutput==="object"){info=p.structuredOutput;break}}}
-  if(!info||typeof info!=="object"){const reason=d?.candidates?.[0]?.finishReason||d?.promptFeedback?.blockReason||"JSON non disponibile";return {info:null,raw:text,error:`Risposta Gemini non interpretabile (${reason})`}}
-  for(const k of ["product","brand","model","variant","category","color","visible_text","barcode","search_query"])info[k]=clean(info[k]); info.confidence=Math.max(0,Math.min(1,Number(info.confidence)||0));
+  try { r=await request(320,true); }
+  catch(e){ return {info:null,error:e.name==="AbortError"?"Gemini ha impiegato troppo tempo":"Connessione Gemini non riuscita"}; }
+  let d=await r.json().catch(()=>null);
+  let finish=d?.candidates?.[0]?.finishReason;
+  // PRO fallback: if structured generation is truncated, retry with a larger plain-JSON budget.
+  if(finish==="MAX_TOKENS" || !r.ok){
+    try { r=await request(900,false); d=await r.json().catch(()=>null); finish=d?.candidates?.[0]?.finishReason; }
+    catch(e){ return {info:null,error:e.name==="AbortError"?"Gemini ha impiegato troppo tempo":"Connessione Gemini non riuscita"}; }
+  }
+  if(!r.ok){
+    const msg=d?.error?.message || `Gemini ${r.status}`;
+    return {info:null,error:msg.slice(0,220)};
+  }
+  const parts=d?.candidates?.[0]?.content?.parts||[];
+  const text=parts.map(x=>typeof x?.text==="string"?x.text:"").join(" ").trim();
+  let info=parseJsonLoose(text);
+  if(!info){ for(const x of parts){ if(x?.json&&typeof x.json==="object"){info=x.json;break;} if(x?.structuredOutput&&typeof x.structuredOutput==="object"){info=x.structuredOutput;break;} } }
+  if(!info||typeof info!=="object"){
+    // Last-resort recovery from a truncated JSON response.
+    const pick=(k)=>{ const m=text.match(new RegExp('"'+k+'"\\s*:\\s*"([^"\\n\\r}]*)')); return m?m[1]:""; };
+    const recovered={product:pick("product"),brand:pick("brand"),model:pick("model"),variant:pick("variant"),barcode:pick("barcode"),search_query:pick("search_query"),confidence:0};
+    if(Object.values(recovered).some(v=>typeof v==="string"&&v.trim())) info=recovered;
+  }
+  if(!info||typeof info!=="object") return {info:null,raw:text,error:`Risposta Gemini non interpretabile (${finish||"JSON non disponibile"})`};
+  for(const k of ["product","brand","model","variant","barcode","search_query"]) info[k]=clean(info[k]);
+  info.confidence=Math.max(0,Math.min(1,Number(info.confidence)||0));
+  info.category=clean(info.category); info.color=clean(info.color); info.visible_text=clean(info.visible_text);
   return {info,raw:text,error:null};
 }
-
 async function lookupBarcodeProduct(code) {
   const sources=[
     [`https://world.openfoodfacts.org/api/v2/product/${code}.json`,"Open Food Facts"],
@@ -804,15 +832,20 @@ async function exactWebSearch(query, intent, domains=[]) {
   if(!process.env.TAVILY_API_KEY) return {results:[],answer:null};
   const body={query,search_depth:"basic",max_results:8,include_answer:false,include_raw_content:false};
   if(domains.length) body.include_domains=domains;
-  const r=await fetch("https://api.tavily.com/search",{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${process.env.TAVILY_API_KEY}`},body:JSON.stringify(body)});
-  if(!r.ok) return {results:[],answer:null};
-  const d=await r.json(); const out=[];
+  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),15000);
+  let r;
+  try {
+    r=await fetch("https://api.tavily.com/search",{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${process.env.TAVILY_API_KEY}`},signal:controller.signal,body:JSON.stringify(body)});
+    if(!r.ok) return {results:[],answer:null};
+    const d=await r.json(); const out=[];
   for(const x of (d.results||[])){
     const txt=`${x.title||""} ${x.content||""}`;
     const c=normalize({title:compactDescription(x.title,110),description:compactDescription(x.content,260),url:x.url,source:hostOf(x.url),provider:"Tavily",kind:intent.kind||"product",price:priceOf(txt,intent.kind),rating:ratingOf(txt)});
     if(kindEnforcement(c,intent)) out.push(c);
   }
-  return {results:dedupe(out),answer:null};
+    return {results:dedupe(out),answer:null};
+  } catch { return {results:[],answer:null}; }
+  finally { clearTimeout(timer); }
 }
 
 // ── Visual Search: identify image, then search the web for matching products ──
@@ -848,14 +881,19 @@ app.post("/api/visual-search", async (req, res) => {
       exactWebSearch(`${query} comprare prezzo negozio online Italia`,intent,[])
     ];
     const settled=await Promise.all(searches);
-    const all=dedupe(settled.flatMap(x=>x.results));
+    const all=dedupe(settled.flatMap(x=>x?.results||[]));
+    // If AI recognition is weak, still use the user's own description as a safe fallback.
+    if(!all.length && description){
+      const fb=await exactWebSearch(`${description} prezzo comprare Italia`,intent,[]);
+      all.push(...(fb.results||[]));
+    }
     const filtered=all.filter(x=>strictVisualRelevant(`${x.title} ${x.description}`,info) || !core.length);
     const ranked=rank(filtered,intent);
     const answer=ranked.length
       ? `Ho identificato ${[info.brand,info.model,info.product,info.variant].filter(Boolean).join(" ") || "il prodotto"}. Ho cercato dove acquistarlo e ordinato le offerte trovate.`
       : (info.product||info.brand||info.model
         ? `Ho identificato: ${[info.brand,info.model,info.product,info.variant].filter(Boolean).join(" ")}. Non ho trovato ancora un'offerta affidabile: prova una foto più ravvicinata oppure aggiungi marca/modello.`
-        : (visionError||"Non riesco a identificare con sufficiente precisione il prodotto. Prova una foto più ravvicinata e nitida."));
+        : (visionError ? "Non ho identificato il prodotto con sufficiente precisione. Prova una foto più nitida e ravvicinata, oppure aggiungi marca/modello." : "Non riesco a identificare con sufficiente precisione il prodotto."));
     res.json({query,kind:intent.kind,aiAnswer:answer,identified:info,visionError,total:ranked.length,results:ranked});
   } catch(e) { console.error("visual-search:",e); res.status(500).json({error:"Ricerca visiva non disponibile in questo momento."}); }
 });
