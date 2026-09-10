@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.3.0-PRO";
+const VERSION = "10.4.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -259,14 +259,63 @@ function dedupe(items) {
   });
 }
 
+/* ========== LOCAL MARKET PRIORITY + CONTEXT RELEVANCE ========== */
+function countryFromRequest(req){
+  const forced=clean(req.query?.country||req.headers['x-findo-country']);
+  if(/^[A-Z]{2}$/i.test(forced)) return forced.toUpperCase();
+  const lang=String(req.headers['accept-language']||'').toLowerCase();
+  const m=lang.match(/(?:^|,|;|-)\s*([a-z]{2})(?:-|_|$)/i);
+  return (m?.[1]||'it').toUpperCase();
+}
+const COUNTRY_PROFILE={
+  IT:{name:'Italia',domains:['amazon.it','ebay.it','vinted.it','subito.it','facebook.com','etsy.com','mediaworld.it','unieuro.it','eprice.it','trovaprezzi.it','idealo.it','kelkoo.it','backmarket.it','zalando.it','decathlon.it']},
+  US:{name:'USA',domains:['amazon.com','ebay.com','walmart.com','target.com','bestbuy.com','facebook.com','etsy.com','mercari.com','newegg.com','bhphotovideo.com']},
+  GB:{name:'Regno Unito',domains:['amazon.co.uk','ebay.co.uk','facebook.com','etsy.com','argos.co.uk','currys.co.uk','johnlewis.com','ao.com']},
+  DE:{name:'Germania',domains:['amazon.de','ebay.de','facebook.com','etsy.com','kaufland.de','otto.de','mediamarkt.de','saturn.de','idealo.de']},
+  FR:{name:'Francia',domains:['amazon.fr','ebay.fr','facebook.com','etsy.com','cdiscount.com','fnac.com','darty.com','idealo.fr']},
+  ES:{name:'Spagna',domains:['amazon.es','ebay.es','facebook.com','etsy.com','mediamarkt.es','pccomponentes.com','idealo.es']}
+};
+function localProfile(country){ return COUNTRY_PROFILE[country]||COUNTRY_PROFILE.IT; }
+function normalizedWords(text){ return clean(text).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').split(/[^a-z0-9]+/).filter(w=>w.length>1); }
+function contextualRelevance(x,intent){
+  const title=clean(x.title).toLowerCase();
+  const desc=clean(x.description).toLowerCase();
+  const all=`${title} ${desc}`;
+  const terms=(intent.coreTerms||intent.terms||[]).map(clean).filter(t=>t.length>1);
+  if(!terms.length) return 0;
+  let titleHits=0, bodyHits=0;
+  for(const term of terms){
+    const t=term.toLowerCase();
+    if(title.includes(t)) titleHits++;
+    else if(all.includes(t)) bodyHits++;
+  }
+  const coverage=(titleHits*1.5+bodyHits)/Math.max(1,terms.length*1.5);
+  const exactPhrase=terms.filter(t=>t.includes(' ')&&title.includes(t.toLowerCase())).length;
+  const numberTokens=terms.filter(t=>/\d/.test(t));
+  const numbersOk=numberTokens.length===0 || numberTokens.some(t=>all.includes(t.toLowerCase()));
+  let score=Math.min(1,coverage + exactPhrase*.15);
+  if(!numbersOk) score*=.55;
+  return score;
+}
+function localSourceScore(src,country){
+  const h=String(src||'').toLowerCase();
+  const p=localProfile(country);
+  const localHints=p.domains.map(x=>x.replace(/^www\./,''));
+  if(localHints.some(d=>h.includes(d))) return 16;
+  const cc=country.toLowerCase();
+  if(cc==='it' && /\.it\b/.test(h)) return 10;
+  if(cc==='us' && /\.com\b/.test(h)) return 7;
+  return 0;
+}
+
 /* ========== RANKING ========== */
 function rank(items, intent={sort:"best"}) {
   const arr = items.map(normalize);
   const sort = intent.sort||"best";
   for (const x of arr) {
     let score = 25;
-    const match = semanticMatch(x, intent);
-    if (match) { score += match*38; if(match>=0.66) x.why.push("corrisponde alla richiesta"); else if(match<0.34 && intent.kind!=="general") score-=12; }
+    const match = Math.max(semanticMatch(x, intent), contextualRelevance(x, intent));
+    if (match) { score += match*52; if(match>=0.66) x.why.push("corrisponde alla richiesta"); else if(match<0.34 && intent.kind!=="general") score-=12; }
     if (x.rating!=null) { score += (intent.cheap||intent.maxPrice!=null)?x.rating*2.5:x.rating*5; x.why.push(`valutazione ${x.rating}/5`); }
     if (x.price!=null) {
       const p = Number(x.price);
@@ -281,11 +330,11 @@ function rank(items, intent={sort:"best"}) {
     if (x.userRatingCount>100) score+=5; if(x.userRatingCount>500) score+=5;
     if (x.image) score+=3;
     const src = (x.source||"").toLowerCase();
-    // Italian source boost: prioritize Italian domains
-    if (src.includes("autoscout24.it")||src.includes("subito.it")||src.includes("amazon.it")||src.includes("idealo.it")||src.includes("trovaprezzi")||src.includes("immobiliare.it")||src.includes("thefork.it")||src.includes("skyscanner.it")||src.includes("infojobs.it")||src.includes("moto.it")||src.includes("casa.it")||src.includes("idealista.it")||src.includes("motor1.it")||src.includes("quattroruote")||src.includes("volagratis")||src.includes("hotel.it")||src.includes("zoomia")||src.includes("kelkoo")||src.includes("monster.it")) score+=12;
-    else if (src.includes("autoscout")||src.includes("subito")||src.includes("amazon")||src.includes("idealo")||src.includes("ebay")||src.includes("booking")||src.includes("thefork")||src.includes("google")) score+=6;
-    // Penalize generic/non-Italian sources for car/product searches
-    if ((intent.kind==='car'||intent.kind==='motorcycle'||intent.kind==='product')&&!src.includes(".it")&&!src.includes("autoscout")&&!src.includes("subito")&&!src.includes("amazon")&&!src.includes("ebay")&&!src.includes("idealo")&&!src.includes("google")&&!src.includes("thefork")&&!src.includes("booking")) score-=5;
+    const country=intent.country||"IT";
+    score += localSourceScore(src,country);
+    if (src.includes("facebook.com")) score += 4;
+    if ((intent.kind==='car'||intent.kind==='motorcycle'||intent.kind==='product') && match<0.22) score-=22;
+    if (intent.kind==='general' && match<0.18) score-=18;
     x.score = Math.max(0, Math.min(100, Math.round(score)));
   }
   arr.sort((a,b) => {
@@ -577,20 +626,29 @@ function compareItems(ids) {
 
 
 /* ========== UNIVERSAL SEARCH SECTIONS ========== */
-const GLOBAL_SHOPPING_DOMAINS = ["amazon.it","amazon.com","amazon.de","amazon.fr","amazon.es","amazon.co.uk","amazon.nl","amazon.pl","amazon.co.jp","ebay.it","ebay.com","ebay.de","ebay.fr","ebay.co.uk","ebay.es","vinted.it","vinted.com","subito.it","etsy.com","aliexpress.com","temu.com","walmart.com","target.com","rakuten.co.jp","mercari.com","mercari.jp","shopee.com","shopee.th","shopee.sg","lazada.com","mercadolibre.com","mercadolivre.com.br","allegro.pl","bol.com","kaufland.de","cdiscount.com","fnac.com","backmarket.it","backmarket.com","zalando.it","zalando.de","decathlon.it","ikea.com","mediaworld.it","unieuro.it","eprice.it","trony.it","euronics.it","trovaprezzi.it","idealo.it","kelkoo.it","newegg.com","bhphotovideo.com","bestbuy.com","homedepot.com","lowes.com","wayfair.com","farfetch.com","asos.com","stockx.com","goat.com","sephora.com","notino.it"];
-const GLOBAL_SHOPPING_BATCHES=[GLOBAL_SHOPPING_DOMAINS.slice(0,18),GLOBAL_SHOPPING_DOMAINS.slice(18,36),GLOBAL_SHOPPING_DOMAINS.slice(36,54),GLOBAL_SHOPPING_DOMAINS.slice(54)];
+const GLOBAL_SHOPPING_DOMAINS = [
+  "facebook.com","facebook.com/marketplace","amazon.it","amazon.com","amazon.de","amazon.fr","amazon.es","amazon.co.uk","amazon.nl","amazon.pl","amazon.co.jp",
+  "ebay.it","ebay.com","ebay.de","ebay.fr","ebay.co.uk","ebay.es","vinted.it","vinted.com","subito.it","etsy.com","aliexpress.com","temu.com",
+  "walmart.com","target.com","rakuten.co.jp","mercari.com","mercari.jp","shopee.com","shopee.th","shopee.sg","lazada.com","mercadolibre.com","mercadolivre.com.br",
+  "allegro.pl","bol.com","kaufland.de","otto.de","cdiscount.com","fnac.com","darty.com","backmarket.it","backmarket.com","zalando.it","zalando.de",
+  "decathlon.it","ikea.com","mediaworld.it","unieuro.it","eprice.it","trony.it","euronics.it","trovaprezzi.it","idealo.it","kelkoo.it","newegg.com",
+  "bhphotovideo.com","bestbuy.com","homedepot.com","lowes.com","wayfair.com","farfetch.com","asos.com","stockx.com","goat.com","sephora.com","notino.it",
+  "carrefour.fr","carrefour.it","lidl.it","conad.it","esselunga.it","coop.it","manomano.it","leroymerlin.it","bricoman.it","grainger.com","zoro.com"
+];
+const GLOBAL_SHOPPING_BATCHES=[];
+for(let i=0;i<GLOBAL_SHOPPING_DOMAINS.length;i+=12) GLOBAL_SHOPPING_BATCHES.push(GLOBAL_SHOPPING_DOMAINS.slice(i,i+12));
 const SEARCH_SECTIONS = {
-  shopping: {label:"Shopping", icon:"🛍️", kind:"product", suffix:" buy price online", domains:GLOBAL_SHOPPING_DOMAINS},
-  experiences: {label:"Esperienze", icon:"🎟️", kind:"general", suffix:" esperienze attività cose da fare Italia", domains:["getyourguide.it","viator.com","tripadvisor.it","feverup.com"]},
-  places: {label:"Luoghi", icon:"📍", kind:"general", suffix:" vicino a me luogo attività Italia", domains:[]},
-  travel: {label:"Viaggi", icon:"✈️", kind:"general", suffix:" viaggio hotel volo offerte Italia", domains:["booking.com","skyscanner.it","trivago.it","volagratis.com"]},
-  services: {label:"Servizi", icon:"🛠️", kind:"general", suffix:" servizio professionista Italia", domains:[]},
-  jobs: {label:"Lavoro", icon:"💼", kind:"job", suffix:" offerta lavoro Italia", domains:["indeed.it","infojobs.it","linkedin.com","monster.it"]},
-  homes: {label:"Immobili", icon:"🏠", kind:"realestate", suffix:" vendita affitto Italia", domains:["immobiliare.it","idealista.it","casa.it","subito.it"]}
+  shopping: {label:"Shopping", icon:"🛍️", kind:"product", suffix:" acquisto prezzo comprare online", domains:GLOBAL_SHOPPING_DOMAINS},
+  experiences: {label:"Esperienze", icon:"🎟️", kind:"general", suffix:" esperienza attività evento escursione tour prenotazione", domains:["getyourguide.it","getyourguide.com","viator.com","tripadvisor.it","tripadvisor.com","feverup.com","eventbrite.com","airbnb.com","klook.com","musement.com","tiqets.com","headout.com"]},
+  places: {label:"Luoghi", icon:"📍", kind:"general", suffix:" luogo attività locale vicino", domains:[]},
+  travel: {label:"Viaggi", icon:"✈️", kind:"general", suffix:" viaggio hotel volo offerte prenotazione", domains:["booking.com","skyscanner.it","skyscanner.com","trivago.it","trivago.com","volagratis.com","expedia.com","kayak.com","airbnb.com"]},
+  services: {label:"Servizi", icon:"🛠️", kind:"general", suffix:" servizio professionista preventivo prenotazione", domains:[]},
+  jobs: {label:"Lavoro", icon:"💼", kind:"job", suffix:" offerta lavoro posizione candidatura", domains:["indeed.it","indeed.com","infojobs.it","linkedin.com","monster.it","glassdoor.com","jooble.org"]},
+  homes: {label:"Immobili", icon:"🏠", kind:"realestate", suffix:" vendita affitto immobile annuncio", domains:["immobiliare.it","idealista.it","casa.it","subito.it","immobiliare.com","idealista.com","rightmove.co.uk","zillow.com","realtor.com"]}
 };
 function sectionSpec(section){ return SEARCH_SECTIONS[clean(section).toLowerCase()] || null; }
 function sectionSearchQuery(q, spec){ return `${q} ${spec?.suffix||''}`.replace(/\s+/g,' ').trim(); }
-async function searchSection(q, section, lat, lon){
+async function searchSection(q, section, lat, lon, country="IT"){
   const spec=sectionSpec(section);
   if(!spec) return {results:[],kind:"general",aiAnswer:null};
   let kind=spec.kind;
@@ -601,15 +659,28 @@ async function searchSection(q, section, lat, lon){
   if(section==='places' && ['restaurant','hotel','pharmacy','gas'].includes(detected)) kind=detected;
   const intent=parseIntent(q,kind,lat,lon);
   intent.section=section;
+  intent.country=country;
   let webResult={results:[],aiAnswer:null};
   if(section==='shopping') {
     if(kind==='product'||kind==='car'||kind==='motorcycle') {
-      const qs=[exactWebSearch(`"${q}" buy price online`,intent,[]),exactWebSearch(`${q} buy price shop online worldwide`,intent,[]),...GLOBAL_SHOPPING_BATCHES.map(dom=>exactWebSearch(`${q} buy price online`,intent,dom))];
+      const local=localProfile(country);
+      const localDomains=[...local.domains,"facebook.com/marketplace","subito.it","vinted.it"].filter((v,i,a)=>a.indexOf(v)===i);
+      const preciseQueries=[`"${q}" comprare prezzo online`, `"${q}" buy price online`, `${q} prezzo offerta acquisto`, `site:facebook.com/marketplace ${q} buy sale`];
+      const qs=[...preciseQueries.map(qq=>exactWebSearch(qq,intent,[])), ...localDomains.map(d=>exactWebSearch(`${q} buy price`,intent,[d])), ...GLOBAL_SHOPPING_BATCHES.map(dom=>exactWebSearch(`${q} buy price online`,intent,dom))];
       const ss=await Promise.allSettled(qs);
       webResult={results:dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[])),aiAnswer:null};
     } else webResult=await tavilySearch(sectionSearchQuery(q,spec),intent,{name:"Shopping Web",domains:spec.domains});
   } else if(section==='jobs'||section==='homes') {
     webResult=await multiSourceWeb(q,intent);
+  } else if(section==='experiences') {
+    const qs=[
+      exactWebSearch(`"${q}" esperienza attività evento tour prenotazione`,intent,spec.domains),
+      exactWebSearch(`${q} attività da fare esperienza tour evento`,intent,spec.domains),
+      exactWebSearch(`${q} experience activity tour event booking`,intent,spec.domains),
+      exactWebSearch(`${q} ${localProfile(country).name} esperienza`,intent,[])
+    ];
+    const ss=await Promise.allSettled(qs);
+    webResult={results:dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[])),aiAnswer:null};
   } else {
     webResult=await tavilySearch(sectionSearchQuery(q,spec),intent,{name:spec.label,domains:spec.domains});
   }
@@ -658,6 +729,7 @@ app.get("/api/health", (req, res) => res.json({
 
 app.get("/api/search", async (req, res) => {
   const q = clean(req.query.q), lat = req.query.lat, lon = req.query.lon;
+  const country = countryFromRequest(req);
   const section = clean(req.query.section).toLowerCase();
   if (!q) return res.status(400).json({error:"Inserisci cosa stai cercando."});
   const detectedKind = detect(q);
@@ -667,14 +739,15 @@ app.get("/api/search", async (req, res) => {
   // Universal mode: a general query opens on Shopping first, while the user can
   // switch instantly to Experiences, Places, Travel, Services, Jobs or Homes.
   if (spec) {
-    const cacheKey = JSON.stringify([q,lat,lon,initialSection]);
+    const cacheKey = JSON.stringify([q,lat,lon,initialSection,country]);
     const cached=cacheGet(cacheKey);
     if(cached) return res.json({...cached,cached:true});
     try {
-      const out=await searchSection(q,initialSection,lat,lon);
+      const out=await searchSection(q,initialSection,lat,lon,country);
       const intent=out.intent || parseIntent(q,out.kind||detectedKind,lat,lon);
       intent.section=initialSection;
-      const payload={results:out.results||[],aiAnswer:out.aiAnswer||null,intent,section:initialSection,sectionLabel:spec.label,sectionIcon:spec.icon,availableSections:Object.entries(SEARCH_SECTIONS).map(([id,v])=>({id,label:v.label,icon:v.icon}))};
+      intent.country=country;
+      const payload={results:out.results||[],aiAnswer:out.aiAnswer||null,intent,section:initialSection,sectionLabel:spec.label,sectionIcon:spec.icon,country,availableSections:Object.entries(SEARCH_SECTIONS).map(([id,v])=>({id,label:v.label,icon:v.icon}))};
       recordPriceHistory(payload.results);
       cacheSet(cacheKey,payload);
       return res.json(payload);
