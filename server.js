@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.2.0-PRO";
+const VERSION = "10.3.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -577,8 +577,10 @@ function compareItems(ids) {
 
 
 /* ========== UNIVERSAL SEARCH SECTIONS ========== */
+const GLOBAL_SHOPPING_DOMAINS = ["amazon.it","amazon.com","amazon.de","amazon.fr","amazon.es","amazon.co.uk","amazon.nl","amazon.pl","amazon.co.jp","ebay.it","ebay.com","ebay.de","ebay.fr","ebay.co.uk","ebay.es","vinted.it","vinted.com","subito.it","etsy.com","aliexpress.com","temu.com","walmart.com","target.com","rakuten.co.jp","mercari.com","mercari.jp","shopee.com","shopee.th","shopee.sg","lazada.com","mercadolibre.com","mercadolivre.com.br","allegro.pl","bol.com","kaufland.de","cdiscount.com","fnac.com","backmarket.it","backmarket.com","zalando.it","zalando.de","decathlon.it","ikea.com","mediaworld.it","unieuro.it","eprice.it","trony.it","euronics.it","trovaprezzi.it","idealo.it","kelkoo.it","newegg.com","bhphotovideo.com","bestbuy.com","homedepot.com","lowes.com","wayfair.com","farfetch.com","asos.com","stockx.com","goat.com","sephora.com","notino.it"];
+const GLOBAL_SHOPPING_BATCHES=[GLOBAL_SHOPPING_DOMAINS.slice(0,18),GLOBAL_SHOPPING_DOMAINS.slice(18,36),GLOBAL_SHOPPING_DOMAINS.slice(36,54),GLOBAL_SHOPPING_DOMAINS.slice(54)];
 const SEARCH_SECTIONS = {
-  shopping: {label:"Shopping", icon:"🛍️", kind:"product", suffix:" comprare prezzo online Italia", domains:["amazon.it","ebay.it","idealo.it","trovaprezzi.it","mediaworld.it","unieuro.it","eprice.it","subito.it"]},
+  shopping: {label:"Shopping", icon:"🛍️", kind:"product", suffix:" buy price online", domains:GLOBAL_SHOPPING_DOMAINS},
   experiences: {label:"Esperienze", icon:"🎟️", kind:"general", suffix:" esperienze attività cose da fare Italia", domains:["getyourguide.it","viator.com","tripadvisor.it","feverup.com"]},
   places: {label:"Luoghi", icon:"📍", kind:"general", suffix:" vicino a me luogo attività Italia", domains:[]},
   travel: {label:"Viaggi", icon:"✈️", kind:"general", suffix:" viaggio hotel volo offerte Italia", domains:["booking.com","skyscanner.it","trivago.it","volagratis.com"]},
@@ -601,8 +603,11 @@ async function searchSection(q, section, lat, lon){
   intent.section=section;
   let webResult={results:[],aiAnswer:null};
   if(section==='shopping') {
-    if(kind==='product'||kind==='car'||kind==='motorcycle') webResult=await multiSourceWeb(q,intent);
-    else webResult=await tavilySearch(sectionSearchQuery(q,spec),intent,{name:"Shopping Web",domains:spec.domains});
+    if(kind==='product'||kind==='car'||kind==='motorcycle') {
+      const qs=[exactWebSearch(`"${q}" buy price online`,intent,[]),exactWebSearch(`${q} buy price shop online worldwide`,intent,[]),...GLOBAL_SHOPPING_BATCHES.map(dom=>exactWebSearch(`${q} buy price online`,intent,dom))];
+      const ss=await Promise.allSettled(qs);
+      webResult={results:dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[])),aiAnswer:null};
+    } else webResult=await tavilySearch(sectionSearchQuery(q,spec),intent,{name:"Shopping Web",domains:spec.domains});
   } else if(section==='jobs'||section==='homes') {
     webResult=await multiSourceWeb(q,intent);
   } else {
@@ -873,7 +878,7 @@ async function lookupBarcodeProduct(code) {
 
 async function exactWebSearch(query, intent, domains=[]) {
   if(!process.env.TAVILY_API_KEY) return {results:[],answer:null};
-  const body={query,search_depth:"basic",max_results:8,include_answer:false,include_raw_content:false};
+  const body={query,search_depth:"advanced",max_results:10,include_answer:false,include_raw_content:false};
   if(domains.length) body.include_domains=domains;
   const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),15000);
   let r;
@@ -903,15 +908,8 @@ app.post("/api/visual-search", async (req, res) => {
       const vr=await geminiVision(image,description);
       if(vr.info) {
         info={...info,...vr.info};
-        // Secondo passaggio solo quando il riconoscimento è debole: chiede a Gemini
-        // di verificare modello/sigla/variante senza raddoppiare il costo per le foto già chiare.
-        if(Number(vr.info.confidence||0)<0.82 || (!vr.info.model && !vr.info.product)) {
-          const vr2=await geminiVision(image,`${description||"nessuna descrizione"}. Verifica soprattutto marca, modello esatto, sigla e variante; non usare nomi generici.`);
-          if(vr2.info && Number(vr2.info.confidence||0)>=Number(vr.info.confidence||0)) {
-            for(const k of ["product","brand","model","variant","barcode","search_query"]) if(clean(vr2.info[k])) info[k]=clean(vr2.info[k]);
-            info.confidence=Number(vr2.info.confidence||info.confidence||0);
-          }
-        }
+        const vr2=await geminiVision(image,`${description||"nessuna descrizione"}. SECONDA VERIFICA INDIPENDENTE: analizza la foto come un catalogatore. Controlla logo, testo, modello, sigla, capacità/taglia/colore, confezione e forma. Non confondere prodotti della stessa famiglia.`);
+        if(vr2.info){ const a=vr.info,b=vr2.info; for(const k of ["product","brand","model","variant","barcode"]){const av=clean(a[k]),bv=clean(b[k]); if(av&&bv&&av.toLowerCase()===bv.toLowerCase()) info[k]=av; else if(bv&&Number(b.confidence||0)>Number(a.confidence||0)+.08) info[k]=bv; else if(av) info[k]=av;} info.search_query=clean(a.search_query)||clean(b.search_query)||info.search_query; info.confidence=Math.max(Number(a.confidence||0),Number(b.confidence||0)); }
       } else visionError=vr.error;
     }
     const barcode=normalizeBarcodeCode(info.barcode||"");
@@ -929,17 +927,10 @@ app.post("/api/visual-search", async (req, res) => {
     const strong=[info.brand,info.model,info.variant].map(clean).filter(x=>x.length>=3);
     const intent={kind:detect(query)==="general"?"product":detect(query),coreTerms:strong.length?strong:(core.length?core:[query]),terms:core.length?core:[query],cheap:false,maxPrice:null,near:false,openNow:false,sort:"best"};
     if(!["product","car","motorcycle"].includes(intent.kind)) intent.kind="product";
-    const domains=["amazon.it","ebay.it","idealo.it","trovaprezzi.it","subito.it","mediaworld.it","unieuro.it"];
-    // PRO visual search: run independent exact shopping variants in parallel.
-    // This avoids relying on one wording and greatly improves model/variant recall.
     const q1=strong.length ? strong.join(" ") : searchPhrase;
     const q2=searchPhrase;
     const q3=[info.product,description].map(clean).filter(Boolean).join(" ");
-    const searches=[
-      exactWebSearch(`"${q1}" prezzo comprare Italia`,intent,domains),
-      exactWebSearch(`"${q2}" acquisto prezzo Italia`,intent,domains),
-      exactWebSearch(`${q3} comprare negozio online Italia`,intent,[])
-    ];
+    const searches=[exactWebSearch(`"${q1}" buy price online`,intent,[]),exactWebSearch(`"${q2}" buy price shop`,intent,[]),exactWebSearch(`${q3} buy online price`,intent,[]),...GLOBAL_SHOPPING_BATCHES.map(dom=>exactWebSearch(`"${q1}" buy price online`,intent,dom))];
     const settled=await Promise.allSettled(searches);
     const all=dedupe(settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
     // Only apply strict filtering when it actually produces matches. This prevents
@@ -957,10 +948,11 @@ app.post("/api/visual-search", async (req, res) => {
     for(const r of ranked){
       const text=lower(`${r.title} ${r.description}`);
       let boost=0;
-      if(info.model && text.includes(lower(info.model))) boost+=24;
-      if(info.brand && text.includes(lower(info.brand))) boost+=14;
-      if(info.variant && text.includes(lower(info.variant))) boost+=10;
-      if(info.product && text.includes(lower(info.product))) boost+=8;
+      if(info.model && text.includes(lower(info.model))) boost+=38;
+      else if(info.model && info.model.length>=5) boost-=18;
+      if(info.brand && text.includes(lower(info.brand))) boost+=16;
+      if(info.variant && text.includes(lower(info.variant))) boost+=14;
+      if(info.product && text.includes(lower(info.product))) boost+=10;
       r.score=Math.min(100,(Number(r.score)||0)+boost);
       if(boost>=24 && !r.why.includes("modello identificato")) r.why.unshift("modello identificato");
     }
@@ -983,19 +975,14 @@ app.get("/api/barcode", async (req, res) => {
     const baseName=[p?.brand,p?.productName].filter(Boolean).join(" ").trim();
     const intent={kind:"product",original:baseName||code,near:false,openNow:false,cheap:true,expensive:false,maxPrice:null,city:null,terms:[code,...(baseName?baseName.split(/\s+/):[])],coreTerms:[code,...(baseName?baseName.split(/\s+/):[])],sort:"price"};
     const results=[]; let aiAnswer=null;
-    const queries=[
-      [`EAN ${code} ${baseName} prezzo Italia dove comprare`,["amazon.it","ebay.it","idealo.it","trovaprezzi.it"]],
-      [`"${code}" ${baseName} prezzo`,["mediaworld.it","unieuro.it","eprice.it","subito.it"]]
-    ];
+    const queries=[[`"${code}" ${baseName} buy price online`,[]],[`EAN ${code} ${baseName} buy shop worldwide`,[]],...GLOBAL_SHOPPING_BATCHES.map(dom=>[`"${code}" ${baseName} buy price`,dom])];
     if(process.env.TAVILY_API_KEY){
       const settled=await Promise.all(queries.map(([q,domains])=>exactWebSearch(q,intent,domains)));
-      aiAnswer=settled.find(x=>x.answer)?.answer||null;
       for(const s of settled) results.push(...s.results);
     }
     let ranked=rank(dedupe(results),intent);
-    // Barcode is an exact identifier: discard results that don't contain the code when code is visible.
-    const exact=ranked.filter(x=>`${x.title} ${x.description}`.includes(code));
-    if(exact.length) ranked=exact;
+    for(const r of ranked){ const txt=`${r.title} ${r.description}`.toLowerCase(); if(txt.includes(code.toLowerCase())) r.score=Math.min(100,(r.score||0)+55); else if(baseName && txt.includes(baseName.toLowerCase())) r.score=Math.min(100,(r.score||0)+18); }
+    ranked.sort((a,b)=>(b.score||0)-(a.score||0));
     res.json({ok:true,kind:"product",code,productName:p?.productName||null,brand:p?.brand||null,image:p?.image||null,description:p?.description||null,categories:p?.categories||null,source:p?.source||null,aiAnswer:aiAnswer|| (p?`Prodotto identificato: ${[p.brand,p.productName].filter(Boolean).join(" ")}`:`Codice ${code} identificato, ma non presente nei cataloghi FINDO.`),total:ranked.length,results:ranked.slice(0,40)});
   } catch(e){ console.error("barcode:",e); res.status(500).json({error:"Ricerca barcode non disponibile in questo momento."}); }
 });
