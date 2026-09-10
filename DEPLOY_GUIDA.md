@@ -15,3 +15,16 @@ Lo scanner usa il `BarcodeDetector` quando disponibile e verifica prima i format
 
 ## Qualità della ricerca
 FINDO 9 usa ricerca multi-sorgente, filtri di categoria, corrispondenza semantica, controllo del budget, penalizzazione dei risultati non pertinenti e priorità ai risultati che contengono modello/marca/codice cercati.
+
+## FINDO 10.9 — API stabili
+
+Imposta le variabili ambiente del server **una sola volta**:
+
+- `TAVILY_API_KEY` = chiave Tavily principale per la ricerca web.
+- `GEMINI_API_KEY` = chiave Google Gemini per ricerca visiva/interpretazione immagini.
+- `GEMINI_MODELS` = opzionale; di default FINDO usa `gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash` e passa automaticamente al modello successivo se quello configurato non è disponibile.
+- `TAVILY_API_KEYS` / `GEMINI_API_KEYS` = opzionali, più chiavi separate da virgola per failover automatico.
+
+Le chiavi non sono inserite nel browser e non vanno inserite nel file `public/index.html`.
+
+FINDO 10.9 gestisce automaticamente retry, `429 Retry-After`, errori temporanei, rotazione delle chiavi e fallback tra modelli Gemini. Una singola chiave valida resta configurata finché non viene revocata/ruotata dal provider o cambiano quota/piano: non va sostituita a ogni avvio.
