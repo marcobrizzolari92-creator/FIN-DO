@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.5.0-PRO";
+const VERSION = "10.6.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -267,24 +267,87 @@ function metaTag(html, prop){
 }
 async function pageMeta(url){
   if(!/^https?:\/\//i.test(String(url||''))) return null;
-  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),4500);
+  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),5000);
   try{
-    const r=await fetch(url,{redirect:'follow',signal:controller.signal,headers:{'User-Agent':'Mozilla/5.0 (compatible; FINDO/10.5; +https://findo.app)'}});
+    const r=await fetch(url,{redirect:'follow',signal:controller.signal,headers:{'User-Agent':'Mozilla/5.0 (compatible; FINDO/10.6; +https://findo.app)','Accept':'text/html,application/xhtml+xml'}});
     if(!r.ok) return null;
     const finalUrl=r.url||url;
-    const html=(await r.text()).slice(0,350000);
-    const canonical=metaTag(html,'og:url') || (html.match(/<link[^>]+rel=[\"']canonical[\"'][^>]+href=[\"']([^\"']+)[\"']/i)?.[1]||'');
+    const html=(await r.text()).slice(0,600000);
+    const canonical=metaTag(html,'og:url') || (html.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i)?.[1]||'');
     const image=metaTag(html,'og:image') || metaTag(html,'twitter:image') || metaTag(html,'og:image:url');
     const title=metaTag(html,'og:title');
     const abs=(v)=>{try{return v?new URL(v,finalUrl).href:null}catch{return null}};
-    return {url:finalUrl,directUrl:abs(canonical)||finalUrl,image:abs(image),title:title||null};
+
+    // Some marketplaces expose the real listing only as an anchor inside a
+    // search/category page. Recover the best listing-looking link before
+    // accepting the page URL as the destination.
+    let listingUrl=null;
+    if(looksLikeSearchPage(finalUrl)){
+      const anchors=[];
+      const re=/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+      let m;
+      while((m=re.exec(html)) && anchors.length<1200){
+        const href=abs(decodeHtml(m[1]));
+        const text=decodeHtml(m[2].replace(/<[^>]+>/g,' ')).replace(/\s+/g,' ').trim();
+        if(!href || !/^https?:\/\//i.test(href) || looksLikeSearchPage(href)) continue;
+        if(text.length<8) continue;
+        anchors.push({href,text});
+      }
+      const base=clean(title||'').toLowerCase();
+      const tokens=normalizedWords(base).filter(w=>w.length>2).slice(0,12);
+      let best=null;
+      for(const a of anchors){
+        const t=a.text.toLowerCase();
+        const hits=tokens.filter(w=>t.includes(w)).length;
+        const score=hits/Math.max(1,tokens.length) + (tokens.length && t.includes(base)?0.65:0) + (/[\/]annunci?[\/-]|\/offerte?[\/-]|\/auto\//i.test(a.href)?0.18:0);
+        if(!best || score>best.score) best={...a,score};
+      }
+      if(best && best.score>=0.35) listingUrl=best.href;
+    }
+    return {url:finalUrl,directUrl:listingUrl||abs(canonical)||finalUrl,image:abs(image),title:title||null};
   }catch{return null}
   finally{clearTimeout(timer)}
 }
+
+async function rescueDirectUrl(item){
+  if(!item || !looksLikeSearchPage(item.directUrl||item.url)) return item;
+  if(!process.env.TAVILY_API_KEY) return item;
+  const host=hostOf(item.url||item.directUrl);
+  const title=clean(item.title||'');
+  if(!title || !host) return item;
+  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),7000);
+  try{
+    const q=`"${title.slice(0,180)}" site:${host}`;
+    const body={query:q,search_depth:'advanced',max_results:6,include_answer:false,include_raw_content:false,include_domains:[host]};
+    const r=await fetch('https://api.tavily.com/search',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${process.env.TAVILY_API_KEY}`},signal:controller.signal,body:JSON.stringify(body)});
+    if(!r.ok) return item;
+    const d=await r.json();
+    const tokens=normalizedWords(title).filter(w=>w.length>2).slice(0,14);
+    let best=null;
+    for(const x of (d.results||[])){
+      const u=String(x.url||''); if(!u || looksLikeSearchPage(u)) continue;
+      const txt=`${x.title||''} ${x.content||''}`.toLowerCase();
+      const hits=tokens.filter(w=>txt.includes(w)).length;
+      const score=hits/Math.max(1,tokens.length) + (String(x.title||'').toLowerCase().includes(title.toLowerCase())?0.7:0);
+      if(!best || score>best.score) best={url:u,title:x.title||'',score};
+    }
+    if(best && best.score>=0.35){
+      item.directUrl=best.url; item.linkQuality='direct'; item.pageResolved=true;
+      const m=await pageMeta(best.url);
+      if(m?.directUrl && !looksLikeSearchPage(m.directUrl)) item.directUrl=m.directUrl;
+      if(m?.image) item.image=m.image;
+      if(m?.title && (!item.title || item.title==='Risultato')) item.title=compactDescription(m.title,110);
+    }
+  }catch{}
+  finally{clearTimeout(timer)}
+  return item;
+}
+
 async function enrichResultMetadata(results, limit=30){
   const out=[...results];
-  for(let i=0;i<Math.min(limit,out.length);i+=6){
-    const batch=out.slice(i,i+6);
+  // First pass: canonical/OG metadata and link extraction.
+  for(let i=0;i<Math.min(limit,out.length);i+=5){
+    const batch=out.slice(i,i+5);
     const metas=await Promise.all(batch.map(x=>pageMeta(x.directUrl||x.url)));
     metas.forEach((m,j)=>{
       if(!m) return;
@@ -296,8 +359,14 @@ async function enrichResultMetadata(results, limit=30){
       x.linkQuality=looksLikeSearchPage(x.directUrl||x.url)?'search':'direct';
     });
   }
-  // Direct product/listing pages win over category/search pages when relevance is close.
-  for(const x of out){ if(x.linkQuality==='direct') x.score=Math.min(100,(x.score||0)+5); else if(x.linkQuality==='search') x.score=Math.max(0,(x.score||0)-8); }
+  // Second pass: only unresolved search/category pages get a targeted rescue.
+  const candidates=out.filter(x=>looksLikeSearchPage(x.directUrl||x.url)).slice(0,18);
+  for(let i=0;i<candidates.length;i+=3) await Promise.all(candidates.slice(i,i+3).map(rescueDirectUrl));
+  for(const x of out){
+    if(!x.linkQuality) x.linkQuality=looksLikeSearchPage(x.directUrl||x.url)?'search':'direct';
+    if(x.linkQuality==='direct') x.score=Math.min(100,(x.score||0)+8);
+    else if(x.linkQuality==='search') x.score=Math.max(0,(x.score||0)-15);
+  }
   return out.sort((a,b)=>(b.score||0)-(a.score||0));
 }
 
