@@ -257,8 +257,16 @@ function normalize(x) {
 // canonical metadata is safer than blindly opening the first indexed URL.
 function looksLikeSearchPage(url){
   const u=String(url||'').toLowerCase();
-  return /(?:[?&](?:q|query|search|keyword|text|filter|page)=)|\/(?:search|ricerca|search-results|results|listing|listings|catalog|category|categorie)(?:[/?#]|$)|\/marketplace(?:[/?#]|$)/i.test(u);
+  return /(?:[?&](?:q|query|search|keyword|text|filter|page|sort|order)=)|\/(?:search|ricerca|search-results|results|listing|listings|catalog|category|categorie|inventory|vehicles|cars|auto|offerte|annunci)(?:[/?#]|$)|\/marketplace(?:[/?#]|$)/i.test(u);
 }
+function looksLikeDirectListing(url){
+  const u=String(url||'').toLowerCase();
+  if(!/^https?:\/\//.test(u) || looksLikeSearchPage(u)) return false;
+  return /\/(?:annunci|offerte|offer|item|itm|product|products|dp|p|veicolo|vehicle|car|cars|moto|listing|ad|ads)(?:[\/-]|[?]|$)/i.test(u)
+    || /[a-f0-9]{8,}[-_][a-f0-9]{4,}/i.test(u)
+    || /(?:amazon\.[^/]+\/[^?#]*\/(?:dp|gp\/product)\/|ebay\.[^/]+\/itm\/|autoscout24\.[^/]+\/(?:annunci|offerte)\/|subito\.[^/]+\/annunci\/)/i.test(u);
+}
+
 function decodeHtml(s){ return String(s||'').replace(/&amp;/g,'&').replace(/&quot;/g,'\"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>'); }
 function metaTag(html, prop){
   const re1=new RegExp(`<meta[^>]+(?:property|name)=[\\\"']${prop.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}[\\\"'][^>]+content=[\\\"']([^\\\"']+)[\\\"'][^>]*>`,`i`);
@@ -277,6 +285,23 @@ async function pageMeta(url){
     const image=metaTag(html,'og:image') || metaTag(html,'twitter:image') || metaTag(html,'og:image:url');
     const title=metaTag(html,'og:title');
     const abs=(v)=>{try{return v?new URL(v,finalUrl).href:null}catch{return null}};
+    let structured={};
+    try{
+      const blocks=[...html.matchAll(/<script[^>]+type=[\"']application\/ld\+json[\"'][^>]*>([\s\S]*?)<\/script>/gi)].slice(0,12);
+      for(const b of blocks){
+        const raw=b[1].trim(); if(!raw) continue;
+        const j=JSON.parse(raw);
+        const arr=Array.isArray(j)?j:[j];
+        for(const z of arr){
+          const cand=z?.itemListElement?.[0]?.item || z;
+          if(!structured.title && cand?.name) structured.title=String(cand.name);
+          if(!structured.url && cand?.url) structured.url=String(cand.url);
+          if(!structured.image && cand?.image) structured.image=Array.isArray(cand.image)?cand.image[0]:cand.image;
+          const a=cand?.address || cand?.seller?.address || cand?.offers?.seller?.address;
+          if(!structured.address && a) structured.address=typeof a==='string'?a:[a.streetAddress,a.postalCode,a.addressLocality,a.addressRegion,a.addressCountry].filter(Boolean).join(', ');
+        }
+      }
+    }catch{}
 
     // Some marketplaces expose the real listing only as an anchor inside a
     // search/category page. Recover the best listing-looking link before
@@ -304,21 +329,22 @@ async function pageMeta(url){
       }
       if(best && best.score>=0.35) listingUrl=best.href;
     }
-    return {url:finalUrl,directUrl:listingUrl||abs(canonical)||finalUrl,image:abs(image),title:title||null};
+    return {url:finalUrl,directUrl:listingUrl||abs(structured.url)||abs(canonical)||finalUrl,image:abs(image)||abs(structured.image),title:title||structured.title||null,address:structured.address||null};
   }catch{return null}
   finally{clearTimeout(timer)}
 }
 
 async function rescueDirectUrl(item){
-  if(!item || !looksLikeSearchPage(item.directUrl||item.url)) return item;
+  if(!item) return item;
   if(!process.env.TAVILY_API_KEY) return item;
   const host=hostOf(item.url||item.directUrl);
   const title=clean(item.title||'');
   if(!title || !host) return item;
   const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),7000);
   try{
-    const q=`"${title.slice(0,180)}" site:${host}`;
-    const body={query:q,search_depth:'advanced',max_results:6,include_answer:false,include_raw_content:false,include_domains:[host]};
+    const detailHints=[item.price!=null?`€${item.price}`:'',item.mileage!=null?`${item.mileage} km`:''].filter(Boolean).join(' ');
+    const q=`"${title.slice(0,180)}" ${detailHints} site:${host}`;
+    const body={query:q,search_depth:'advanced',max_results:8,include_answer:false,include_raw_content:false,include_domains:[host]};
     const r=await fetch('https://api.tavily.com/search',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${process.env.TAVILY_API_KEY}`},signal:controller.signal,body:JSON.stringify(body)});
     if(!r.ok) return item;
     const d=await r.json();
@@ -328,7 +354,9 @@ async function rescueDirectUrl(item){
       const u=String(x.url||''); if(!u || looksLikeSearchPage(u)) continue;
       const txt=`${x.title||''} ${x.content||''}`.toLowerCase();
       const hits=tokens.filter(w=>txt.includes(w)).length;
-      const score=hits/Math.max(1,tokens.length) + (String(x.title||'').toLowerCase().includes(title.toLowerCase())?0.7:0);
+      const directBoost=looksLikeDirectListing(u)?0.55:0;
+      const detailHits=[item.price!=null?String(Math.round(item.price)):'',item.mileage!=null?String(Math.round(item.mileage)):''].filter(Boolean).filter(v=>txt.includes(v)).length;
+      const score=hits/Math.max(1,tokens.length) + (String(x.title||'').toLowerCase().includes(title.toLowerCase())?0.7:0) + directBoost + detailHits*.12;
       if(!best || score>best.score) best={url:u,title:x.title||'',score};
     }
     if(best && best.score>=0.35){
@@ -336,6 +364,7 @@ async function rescueDirectUrl(item){
       const m=await pageMeta(best.url);
       if(m?.directUrl && !looksLikeSearchPage(m.directUrl)) item.directUrl=m.directUrl;
       if(m?.image) item.image=m.image;
+      if(m?.address) item.address=m.address;
       if(m?.title && (!item.title || item.title==='Risultato')) item.title=compactDescription(m.title,110);
     }
   }catch{}
@@ -354,18 +383,21 @@ async function enrichResultMetadata(results, limit=30){
       const x=batch[j];
       if(m.directUrl && (!looksLikeSearchPage(m.directUrl) || !looksLikeSearchPage(x.url))) x.directUrl=m.directUrl;
       if(m.image) x.image=m.image;
+      if(m.address) x.address=m.address;
       if(m.title && (!x.title || x.title==='Risultato')) x.title=compactDescription(m.title,110);
       x.pageResolved=true;
       x.linkQuality=looksLikeSearchPage(x.directUrl||x.url)?'search':'direct';
     });
   }
-  // Second pass: only unresolved search/category pages get a targeted rescue.
-  const candidates=out.filter(x=>looksLikeSearchPage(x.directUrl||x.url)).slice(0,18);
-  for(let i=0;i<candidates.length;i+=3) await Promise.all(candidates.slice(i,i+3).map(rescueDirectUrl));
+  // Second pass: every shopping/vehicle result is checked. This is deliberate:
+  // FINDO must open the exact item shown, never the site's generic result page.
+  const shoppingLike = out.filter(x=>['product','car','motorcycle'].includes(x.kind) || looksLikeSearchPage(x.directUrl||x.url));
+  for(let i=0;i<shoppingLike.length;i+=4) await Promise.all(shoppingLike.slice(i,i+4).map(rescueDirectUrl));
   for(const x of out){
-    if(!x.linkQuality) x.linkQuality=looksLikeSearchPage(x.directUrl||x.url)?'search':'direct';
-    if(x.linkQuality==='direct') x.score=Math.min(100,(x.score||0)+8);
-    else if(x.linkQuality==='search') x.score=Math.max(0,(x.score||0)-15);
+    const u=x.directUrl||x.url;
+    x.linkQuality=looksLikeSearchPage(u)?'search':(looksLikeDirectListing(u)?'direct':'unknown');
+    if(x.linkQuality==='direct') x.score=Math.min(100,(x.score||0)+12);
+    else if(x.linkQuality==='search') x.score=Math.max(0,(x.score||0)-28);
   }
   return out.sort((a,b)=>(b.score||0)-(a.score||0));
 }
@@ -425,6 +457,30 @@ function localSourceScore(src,country){
   if(cc==='it' && /\.it\b/.test(h)) return 10;
   if(cc==='us' && /\.com\b/.test(h)) return 7;
   return 0;
+}
+
+/* ========== DISTANCE ENRICHMENT ========== */
+const geoCache=new Map();
+async function geocodeAddress(address){
+  const key=clean(address).toLowerCase(); if(!key) return null;
+  if(geoCache.has(key)) return geoCache.get(key);
+  if(!process.env.GOOGLE_MAPS_API_KEY) return null;
+  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),3500);
+  try{
+    const u=`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${encodeURIComponent(process.env.GOOGLE_MAPS_API_KEY)}`;
+    const r=await fetch(u,{signal:controller.signal}); if(!r.ok) return null;
+    const d=await r.json(); const loc=d.results?.[0]?.geometry?.location;
+    if(!loc) return null; const v={lat:Number(loc.lat),lon:Number(loc.lng)}; geoCache.set(key,v); return v;
+  }catch{return null} finally{clearTimeout(timer)}
+}
+async function enrichDistances(results,lat,lon){
+  if(lat==null||lon==null) return results;
+  const candidates=results.filter(x=>x.distanceKm==null && x.address).slice(0,24);
+  for(let i=0;i<candidates.length;i+=4){
+    const batch=candidates.slice(i,i+4); const pts=await Promise.all(batch.map(x=>geocodeAddress(x.address)));
+    pts.forEach((p,j)=>{ if(p) batch[j].distanceKm=Number(haversineKm(Number(lat),Number(lon),p.lat,p.lon).toFixed(1)); });
+  }
+  return results;
 }
 
 /* ========== RANKING ========== */
@@ -813,7 +869,9 @@ async function searchSection(q, section, lat, lon, country="IT"){
   const filtered=raw.filter(x=>kindEnforcement(x,intent));
   const ranked=rank(dedupe(filtered),intent);
   const enriched=await enrichResultMetadata(ranked, section==='shopping'?36:18);
-  return {results:enriched,kind,aiAnswer:webResult.aiAnswer||null,intent};
+  await enrichDistances(enriched,lat,lon);
+  const finalResults=rank(enriched,intent);
+  return {results:finalResults,kind,aiAnswer:webResult.aiAnswer||null,intent};
 }
 
 /* ========== ROUTES ========== */
