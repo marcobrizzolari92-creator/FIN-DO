@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.6.0-PRO";
+const VERSION = "10.8.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -55,6 +55,18 @@ function limited(ip){
 }
 function cacheGet(k){ const x=cache.get(k); if(!x || now()-x.t>CACHE_TTL){cache.delete(k);return null} return x.v; }
 function cacheSet(k,v){ cache.set(k,{t:now(),v}); if(cache.size>800) { const keys=[...cache.keys()]; for(let i=0;i<100;i++) cache.delete(keys[i]); } }
+
+/* ========== RESILIENT PROVIDER LAYER ========== */
+const providerState = { tavily:{idx:0,downUntil:0}, gemini:{idx:0,downUntil:0} };
+function providerKeys(primary,listEnv){ return [...new Set([process.env[listEnv]||'',primary||''].join(',').split(',').map(clean).filter(Boolean))]; }
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+function rotateProvider(name,keys){ if(keys.length>1) providerState[name].idx=(providerState[name].idx+1)%keys.length; providerState[name].downUntil=Date.now()+1200; }
+function providerHealth(){ return {tavily:{configured:providerKeys(process.env.TAVILY_API_KEY,'TAVILY_API_KEYS').length>0,downUntil:providerState.tavily.downUntil},gemini:{configured:providerKeys(process.env.GEMINI_API_KEY||process.env.GOOGLE_GEMINI_API_KEY,'GEMINI_API_KEYS').length>0,downUntil:providerState.gemini.downUntil}}; }
+async function tavilyFetch(body, timeoutMs=15000, retries=3){
+  const keys=providerKeys(process.env.TAVILY_API_KEY,'TAVILY_API_KEYS'); if(!keys.length) throw new Error('TAVILY_API_KEY non configurata');
+  let last;
+  for(let a=0;a<retries;a++){ const key=keys[(providerState.tavily.idx+a)%keys.length]; const c=new AbortController(); const t=setTimeout(()=>c.abort(),timeoutMs); try{ const r=await fetch('https://api.tavily.com/search',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${key}`},signal:c.signal,body:JSON.stringify(body)}); const txt=await r.text(); let d=null; try{d=JSON.parse(txt)}catch{} if(r.ok){providerState.tavily.idx=(providerState.tavily.idx+a)%keys.length; return d||{};} last=new Error(`Tavily ${r.status}: ${txt.slice(0,180)}`); if([401,403,429,500,502,503,504].includes(r.status)) rotateProvider('tavily',keys); else break; }catch(e){last=e; rotateProvider('tavily',keys);} finally{clearTimeout(t)} await sleep(Math.min(5000,700*2**a+Math.random()*500)); } throw last||new Error('Tavily non disponibile');
+}
 
 /* ========== CAR & MOTO MODELS ========== */
 const CAR_MODELS=/\b(discovery|range\s*rover|land\s*rover|defender|panda|punto|grande\s*punto|500|500e|c\s*hr|yaris|corolla|auris|rav\s*4|golf|passat|tiguan|touareg|polo|up!|focus|fiesta|mustang|kuga|civic|cr[- ]?v|hr[- ]?v|jazz|accord|clio|captur|megane|kadjar|scenic|twingo|corsa|mokka|astra|zafira|insignia|leon|ibiza|ateca|tarraco|arona|sportage|ceed|picanto|rio|i20|i30|tucson|santa\s*fe|sorento|juke|qashqai|x[- ]?trail|micra|pulsar|note|308|208|3008|5008|2008|c3|c4|c5|c3\s*aircross|duster|sandero|logan|s\s*cross|compass|renegade|wrangler|cherokee|grand\s*cherokee|124\s*spider|giulietta|stelvio|giulia|models?\s*[s3x]|model\s*y|cybertruck|leaf|ariya|gtr|clubman|countryman|cooper|swift|vitara|ignis|sx4|s[- ]?cross|space\s*star|colt|l200|pajero|outlander|asx|eclipse\s*cross|yaris\s*cross|aygo\s*x|land\s*cruiser|hilux|supra|gt86|prius|avensis|verso|ranger|explorer|ecosport|puma|mondeo|s[- ]?max|galaxy|c[- ]?max|transit|caddy|transporter|california|c\s*class|e\s*class|s\s*class|a\s*class|b\s*class|gla|glb|glc|gle|gls|cla|cle|clk|slc|slk|sl|amg|gt|eqs|eqe|eqa|eqb|eqc|id\s*\.?[34]|golf\s*gti|golf\s*r|r[- ]?s[2346]|tt|q[23578]|rs[345678]|m[23568]|x[1234567]|z[34]|i[34568]|ix|serie\s*[12345678]|m[23568]\s*serie|arkana|dacia|spring|arkana|t\s*cross|t\s*roc|taigo|nivus|virtus|vento|amarok|caddy|touareg|artega|porsche|cayenne|macan|taycan|panamera|boxster| cayman|maserati|levante|ghibli|quattroporte|mc20|lamborghini|urus|huracan|aventador|ferrari|roma|sf90|f8|296|purosangue|bentley|continental|flying\s*spur|bentayga|rolls\s*royce|ghost|phantom|cullinan|aston\s*martin|db[0-9]+|vantage|volvo|xc[0-9]+|s[0-9]+|v[0-9]+| Polestar)\b/i;
@@ -588,13 +600,12 @@ async function tavilySearch(q, intent={}, plan=null) {
     include_raw_content: false
   };
   if (plan?.domains?.length) body.include_domains = plan.domains;
-  const r = await fetch("https://api.tavily.com/search", {
-    method: "POST",
-    headers: {"Content-Type":"application/json", "Authorization": `Bearer ${process.env.TAVILY_API_KEY}`},
-    body: JSON.stringify(body)
-  });
-  if (!r.ok) { const msg = await r.text().catch(() => ""); throw new Error(`Tavily ${r.status}${msg ? `: ${msg.slice(0,180)}` : ""}`); }
-  const d = await r.json();
+  let d;
+  try { d=await tavilyFetch(body,15000,3); }
+  catch(e) {
+    const fallback={...body,search_depth:"basic",max_results:8};
+    try { d=await tavilyFetch(fallback,12000,2); } catch(e2) { throw e2; }
+  }
   const aiAnswer = null;
   const out = [];
   for (const x of (d.results || [])) {
@@ -870,7 +881,10 @@ async function searchSection(q, section, lat, lon, country="IT"){
   const ranked=rank(dedupe(filtered),intent);
   const enriched=await enrichResultMetadata(ranked, section==='shopping'?36:18);
   await enrichDistances(enriched,lat,lon);
-  const finalResults=rank(enriched,intent);
+  let finalResults=rank(enriched,intent);
+  if(!finalResults.length && providerHealth().tavily.configured){
+    try{ const rescue=await exactWebSearch(`"${q}" ${section==='shopping'?'prezzo acquisto annuncio prodotto':'Italia'}`,intent,[]); const rr=await enrichResultMetadata(rank(dedupe(rescue.results||[]),intent),section==='shopping'?18:10); await enrichDistances(rr,lat,lon); finalResults=rank(rr,intent); }catch{}
+  }
   return {results:finalResults,kind,aiAnswer:webResult.aiAnswer||null,intent};
 }
 
@@ -903,7 +917,7 @@ app.post("/api/learn", (req,res)=>{
 
 app.get("/api/health", (req, res) => res.json({
   ok: true, version: VERSION,
-  providers: {web:!!process.env.TAVILY_API_KEY,places:!!process.env.GOOGLE_MAPS_API_KEY,flights:!!(process.env.AMADEUS_CLIENT_ID&&process.env.AMADEUS_CLIENT_SECRET),gemini:!!(process.env.GEMINI_API_KEY||process.env.GOOGLE_GEMINI_API_KEY)}
+  providers: {web:providerHealth().tavily.configured,places:!!process.env.GOOGLE_MAPS_API_KEY,flights:!!(process.env.AMADEUS_CLIENT_ID&&process.env.AMADEUS_CLIENT_SECRET),gemini:providerHealth().gemini.configured}, providerHealth:providerHealth()
 }));
 
 app.get("/api/search", async (req, res) => {
@@ -1061,8 +1075,8 @@ function strictVisualRelevant(text, info) {
 }
 
 async function geminiVision(image, description="") {
-  const key=process.env.GEMINI_API_KEY || process.env.GOOGLE_GEMINI_API_KEY;
-  if(!key) return {info:null,error:"GEMINI_API_KEY non configurata"};
+  const gkeys=providerKeys(process.env.GEMINI_API_KEY||process.env.GOOGLE_GEMINI_API_KEY,"GEMINI_API_KEYS");
+  if(!gkeys.length) return {info:null,error:"GEMINI_API_KEY non configurata"};
   const match=String(image||"").match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if(!match) return {info:null,error:"Formato immagine non valido"};
   const model=process.env.GEMINI_MODEL || "gemini-3.6-flash";
@@ -1075,11 +1089,20 @@ async function geminiVision(image, description="") {
     if(structured){ generationConfig.responseMimeType="application/json"; generationConfig.responseJsonSchema={type:"object",properties:{product:{type:"string"},brand:{type:"string"},model:{type:"string"},variant:{type:"string"},barcode:{type:"string"},search_query:{type:"string"},confidence:{type:"number",minimum:0,maximum:1}},required:["product","brand","model","variant","barcode","search_query","confidence"],additionalProperties:false}; }
     const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),20000);
     try{
+      const key=gkeys[providerState.gemini.idx % gkeys.length];
       return await fetch(endpoint,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},signal:controller.signal,body:JSON.stringify({contents:[{parts:[{inline_data:{mime_type:match[1],data:match[2]}},{text:prompt}]}],generationConfig})});
     } finally { clearTimeout(timer); }
   };
   let r;
-  try { r=await request(320,true); }
+  try {
+    let lastErr=null;
+    for(let attempt=0;attempt<4;attempt++){
+      try{ r=await request(320,true); if(r.ok || ![401,403,408,429,500,502,503,504].includes(r.status)) break; lastErr=new Error(`Gemini ${r.status}`); if(r.status===401||r.status===403||r.status===429||r.status>=500) rotateProvider("gemini",gkeys); }
+      catch(e){ lastErr=e; rotateProvider("gemini",gkeys); }
+      await sleep(Math.min(5000,700*2**attempt+Math.random()*500));
+    }
+    if(!r) throw lastErr||new Error("Gemini non disponibile");
+  }
   catch(e){ return {info:null,error:e.name==="AbortError"?"Gemini ha impiegato troppo tempo":"Connessione Gemini non riuscita"}; }
   let d=await r.json().catch(()=>null);
   let finish=d?.candidates?.[0]?.finishReason;
@@ -1129,23 +1152,18 @@ async function lookupBarcodeProduct(code) {
 }
 
 async function exactWebSearch(query, intent, domains=[]) {
-  if(!process.env.TAVILY_API_KEY) return {results:[],answer:null};
   const body={query,search_depth:"advanced",max_results:10,include_answer:false,include_raw_content:false};
   if(domains.length) body.include_domains=domains;
-  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),15000);
-  let r;
-  try {
-    r=await fetch("https://api.tavily.com/search",{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${process.env.TAVILY_API_KEY}`},signal:controller.signal,body:JSON.stringify(body)});
-    if(!r.ok) return {results:[],answer:null};
-    const d=await r.json(); const out=[];
+  let d;
+  try { d=await tavilyFetch(body,15000,3); }
+  catch(e) { try { d=await tavilyFetch({...body,search_depth:"basic",max_results:8},12000,2); } catch(e2) { return {results:[],answer:null,providerError:String(e2.message||e.message||'Tavily non disponibile').slice(0,220)}; } }
+  const out=[];
   for(const x of (d.results||[])){
     const txt=`${x.title||""} ${x.content||""}`;
     const c=normalize({title:compactDescription(x.title,110),description:compactDescription(x.content,260),url:x.url,source:hostOf(x.url),provider:"Tavily",kind:intent.kind||"product",price:priceOf(txt,intent.kind),rating:ratingOf(txt)});
     if(kindEnforcement(c,intent)) out.push(c);
   }
-    return {results:dedupe(out),answer:null};
-  } catch { return {results:[],answer:null}; }
-  finally { clearTimeout(timer); }
+  return {results:dedupe(out),answer:null};
 }
 
 // ── Visual Search: identify image, then search the web for matching products ──
