@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.4.0-PRO";
+const VERSION = "10.5.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -239,7 +239,7 @@ function normalize(x) {
   return {
     id: x.id || crypto.createHash("sha1").update(`${x.url||""}|${x.title||""}`).digest("hex").slice(0,12),
     title: clean(x.title)||"Risultato", description: clean(x.description), url: x.url||"",
-    bookingUrl: x.bookingUrl||x.url||"", buyUrl: x.buyUrl||x.url||"",
+    bookingUrl: x.bookingUrl||x.url||"", buyUrl: x.buyUrl||x.url||"", directUrl: x.directUrl||x.url||"",
     source: clean(x.source)||"web", kind: x.kind||"web", provider: x.provider||"web",
     price: x.price??null, currency: x.currency||"EUR", rating: x.rating??null,
     distanceKm: x.distanceKm??null, availability: x.availability||null, openNow: x.openNow??null,
@@ -249,6 +249,56 @@ function normalize(x) {
     year: x.year??null, mileage: x.mileage??null, fuel: x.fuel??null,
     priceHistory: x.priceHistory||null
   };
+}
+
+
+// Resolve the best direct destination and a real social/OG preview image when the
+// source page exposes them. Search engines sometimes return category/search pages;
+// canonical metadata is safer than blindly opening the first indexed URL.
+function looksLikeSearchPage(url){
+  const u=String(url||'').toLowerCase();
+  return /(?:[?&](?:q|query|search|keyword|text|filter|page)=)|\/(?:search|ricerca|search-results|results|listing|listings|catalog|category|categorie)(?:[/?#]|$)|\/marketplace(?:[/?#]|$)/i.test(u);
+}
+function decodeHtml(s){ return String(s||'').replace(/&amp;/g,'&').replace(/&quot;/g,'\"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>'); }
+function metaTag(html, prop){
+  const re1=new RegExp(`<meta[^>]+(?:property|name)=[\\\"']${prop.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}[\\\"'][^>]+content=[\\\"']([^\\\"']+)[\\\"'][^>]*>`,`i`);
+  const re2=new RegExp(`<meta[^>]+content=[\\\"']([^\\\"']+)[\\\"'][^>]+(?:property|name)=[\\\"']${prop.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}[\\\"'][^>]*>`,`i`);
+  return decodeHtml((html.match(re1)?.[1]||html.match(re2)?.[1]||'').trim());
+}
+async function pageMeta(url){
+  if(!/^https?:\/\//i.test(String(url||''))) return null;
+  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),4500);
+  try{
+    const r=await fetch(url,{redirect:'follow',signal:controller.signal,headers:{'User-Agent':'Mozilla/5.0 (compatible; FINDO/10.5; +https://findo.app)'}});
+    if(!r.ok) return null;
+    const finalUrl=r.url||url;
+    const html=(await r.text()).slice(0,350000);
+    const canonical=metaTag(html,'og:url') || (html.match(/<link[^>]+rel=[\"']canonical[\"'][^>]+href=[\"']([^\"']+)[\"']/i)?.[1]||'');
+    const image=metaTag(html,'og:image') || metaTag(html,'twitter:image') || metaTag(html,'og:image:url');
+    const title=metaTag(html,'og:title');
+    const abs=(v)=>{try{return v?new URL(v,finalUrl).href:null}catch{return null}};
+    return {url:finalUrl,directUrl:abs(canonical)||finalUrl,image:abs(image),title:title||null};
+  }catch{return null}
+  finally{clearTimeout(timer)}
+}
+async function enrichResultMetadata(results, limit=30){
+  const out=[...results];
+  for(let i=0;i<Math.min(limit,out.length);i+=6){
+    const batch=out.slice(i,i+6);
+    const metas=await Promise.all(batch.map(x=>pageMeta(x.directUrl||x.url)));
+    metas.forEach((m,j)=>{
+      if(!m) return;
+      const x=batch[j];
+      if(m.directUrl && (!looksLikeSearchPage(m.directUrl) || !looksLikeSearchPage(x.url))) x.directUrl=m.directUrl;
+      if(m.image) x.image=m.image;
+      if(m.title && (!x.title || x.title==='Risultato')) x.title=compactDescription(m.title,110);
+      x.pageResolved=true;
+      x.linkQuality=looksLikeSearchPage(x.directUrl||x.url)?'search':'direct';
+    });
+  }
+  // Direct product/listing pages win over category/search pages when relevance is close.
+  for(const x of out){ if(x.linkQuality==='direct') x.score=Math.min(100,(x.score||0)+5); else if(x.linkQuality==='search') x.score=Math.max(0,(x.score||0)-8); }
+  return out.sort((a,b)=>(b.score||0)-(a.score||0));
 }
 
 function dedupe(items) {
@@ -692,7 +742,9 @@ async function searchSection(q, section, lat, lon, country="IT"){
     try{ raw.push(...await flights(q)); }catch{}
   }
   const filtered=raw.filter(x=>kindEnforcement(x,intent));
-  return {results:rank(dedupe(filtered),intent),kind,aiAnswer:webResult.aiAnswer||null,intent};
+  const ranked=rank(dedupe(filtered),intent);
+  const enriched=await enrichResultMetadata(ranked, section==='shopping'?36:18);
+  return {results:enriched,kind,aiAnswer:webResult.aiAnswer||null,intent};
 }
 
 /* ========== ROUTES ========== */
@@ -991,7 +1043,8 @@ app.post("/api/visual-search", async (req, res) => {
       if(p){ info={...info,product:p.productName||info.product,brand:p.brand||info.brand,category:p.categories||info.category}; }
       const b=await exactWebSearch(`EAN ${barcode} ${visualSearchQuery(info,description)} prezzo Italia dove comprare`,{kind:"product",coreTerms:[barcode,...[info.product,info.brand,info.model].filter(Boolean)],terms:[barcode]},["amazon.it","ebay.it","idealo.it","trovaprezzi.it"]);
       const ranked=rank(b.results,{kind:"product",coreTerms:[barcode,...[info.product,info.brand,info.model].filter(Boolean)],terms:[barcode],cheap:true,sort:"price"});
-      return res.json({query:visualSearchQuery(info,description),kind:"product",aiAnswer:`Codice ${barcode}${info.product?` · ${info.product}`:""}`,identified:info,barcode,visionError,total:ranked.length,results:ranked});
+      const enriched=await enrichResultMetadata(ranked,24);
+      return res.json({query:visualSearchQuery(info,description),kind:"product",aiAnswer:`Codice ${barcode}${info.product?` · ${info.product}`:""}`,identified:info,barcode,visionError,total:enriched.length,results:enriched});
     }
 
     const query=visualSearchQuery(info,description);
@@ -1030,12 +1083,13 @@ app.post("/api/visual-search", async (req, res) => {
       if(boost>=24 && !r.why.includes("modello identificato")) r.why.unshift("modello identificato");
     }
     ranked.sort((a,b)=>(b.score||0)-(a.score||0));
-    const answer=ranked.length
+    const enriched=await enrichResultMetadata(ranked,30);
+    const answer=enriched.length
       ? `Ho identificato ${[info.brand,info.model,info.variant,info.product].filter(Boolean).join(" ") || "il prodotto"}. Ho confrontato le offerte e messo in cima quelle più corrispondenti al modello fotografato.`
       : (info.product||info.brand||info.model
         ? `Ho identificato: ${[info.brand,info.model,info.product,info.variant].filter(Boolean).join(" ")}. Non ho trovato ancora un'offerta affidabile: prova una foto più ravvicinata oppure aggiungi marca/modello.`
         : (visionError ? "Non ho identificato il prodotto con sufficiente precisione. Prova una foto più nitida e ravvicinata, oppure aggiungi marca/modello." : "Non riesco a identificare con sufficiente precisione il prodotto."));
-    res.json({query,kind:intent.kind,aiAnswer:answer,identified:info,visionError,total:ranked.length,results:ranked});
+    res.json({query,kind:intent.kind,aiAnswer:answer,identified:info,visionError,total:enriched.length,results:enriched});
   } catch(e) { console.error("visual-search:",e); res.status(500).json({error:"Ricerca visiva non disponibile in questo momento."}); }
 });
 
@@ -1056,7 +1110,8 @@ app.get("/api/barcode", async (req, res) => {
     let ranked=rank(dedupe(results),intent);
     for(const r of ranked){ const txt=`${r.title} ${r.description}`.toLowerCase(); if(txt.includes(code.toLowerCase())) r.score=Math.min(100,(r.score||0)+55); else if(baseName && txt.includes(baseName.toLowerCase())) r.score=Math.min(100,(r.score||0)+18); }
     ranked.sort((a,b)=>(b.score||0)-(a.score||0));
-    res.json({ok:true,kind:"product",code,productName:p?.productName||null,brand:p?.brand||null,image:p?.image||null,description:p?.description||null,categories:p?.categories||null,source:p?.source||null,aiAnswer:aiAnswer|| (p?`Prodotto identificato: ${[p.brand,p.productName].filter(Boolean).join(" ")}`:`Codice ${code} identificato, ma non presente nei cataloghi FINDO.`),total:ranked.length,results:ranked.slice(0,40)});
+    const enriched=await enrichResultMetadata(ranked,30);
+    res.json({ok:true,kind:"product",code,productName:p?.productName||null,brand:p?.brand||null,image:p?.image||null,description:p?.description||null,categories:p?.categories||null,source:p?.source||null,aiAnswer:aiAnswer|| (p?`Prodotto identificato: ${[p.brand,p.productName].filter(Boolean).join(" ")}`:`Codice ${code} identificato, ma non presente nei cataloghi FINDO.`),total:enriched.length,results:enriched.slice(0,40)});
   } catch(e){ console.error("barcode:",e); res.status(500).json({error:"Ricerca barcode non disponibile in questo momento."}); }
 });
 
