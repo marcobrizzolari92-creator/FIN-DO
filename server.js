@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.11.0-PRO";
+const VERSION = "10.13.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -895,11 +895,11 @@ async function searchSection(q, section, lat, lon, country="IT"){
   }
   const filtered=raw.filter(x=>kindEnforcement(x,intent));
   const ranked=rank(dedupe(filtered),intent);
-  const enriched=await enrichResultMetadata(ranked, section==='shopping'?36:18);
+  const enriched=await enrichResultMetadata(ranked, section==='shopping'?8:8);
   await enrichDistances(enriched,lat,lon);
   let finalResults=rank(enriched,intent);
   if(!finalResults.length && providerHealth().tavily.configured){
-    try{ const rescue=await exactWebSearch(`"${q}" ${section==='shopping'?'prezzo acquisto annuncio prodotto':'Italia'}`,intent,[]); const rr=await enrichResultMetadata(rank(dedupe(rescue.results||[]),intent),section==='shopping'?18:10); await enrichDistances(rr,lat,lon); finalResults=rank(rr,intent); }catch{}
+    try{ const rescue=await exactWebSearch(`"${q}" ${section==='shopping'?'prezzo acquisto annuncio prodotto':'Italia'}`,intent,[]); const rr=await enrichResultMetadata(rank(dedupe(rescue.results||[]),intent),section==='shopping'?4:4); await enrichDistances(rr,lat,lon); finalResults=rank(rr,intent); }catch{}
   }
   return {results:finalResults,kind,aiAnswer:webResult.aiAnswer||null,intent};
 }
@@ -975,6 +975,7 @@ app.get("/api/search", async (req, res) => {
       const payload={results:out.results||[],aiAnswer:out.aiAnswer||null,intent,section:initialSection,sectionLabel:spec.label,sectionIcon:spec.icon,country,availableSections:Object.entries(SEARCH_SECTIONS).map(([id,v])=>({id,label:v.label,icon:v.icon}))};
       recordPriceHistory(payload.results);
       if(payload.results.length>0) cacheSet(cacheKey,payload);
+      if(!payload.results.length){ payload.searchStatus={webConfigured:providerHealth().tavily.configured, message:providerHealth().tavily.configured ? "Nessun risultato dal provider web" : "Provider web non configurato"}; }
       return res.json(payload);
     } catch(e) {
       console.error("section search:",section,e);

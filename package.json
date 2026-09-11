@@ -1,6 +1,6 @@
 {
   "name": "findo",
-  "version": "10.11.0",
+  "version": "10.13.0",
   "description": "FINDO — Cerca, confronta e trova qualsiasi cosa",
   "type": "module",
   "main": "server.js",
