@@ -934,11 +934,12 @@ app.post("/api/learn", (req,res)=>{
 app.get("/api/diagnostics", async (req, res) => {
   const tk = providerKeys(process.env.TAVILY_API_KEY,"TAVILY_API_KEYS");
   const gk = providerKeys(process.env.GEMINI_API_KEY||process.env.GOOGLE_GEMINI_API_KEY,"GEMINI_API_KEYS");
-  const out = {version:VERSION, vercel:process.env.VERCEL === "1", tavilyConfigured:tk.length>0, geminiConfigured:gk.length>0, tavilyLive:null, geminiLive:null};
+  const out = {version:VERSION, vercel:process.env.VERCEL === "1", tavilyConfigured:tk.length>0, geminiConfigured:gk.length>0, tavilyLive:null, duckDuckGoLive:null, geminiLive:null};
   if(tk.length){
     try { const d=await tavilyFetch({query:"test",search_depth:"basic",max_results:1,include_answer:false,include_raw_content:false,topic:"general"},8000,1); out.tavilyLive={ok:true,results:Array.isArray(d.results)?d.results.length:0}; }
     catch(e){ out.tavilyLive={ok:false,error:String(e?.message||e).replace(/tvly-[^\s]+/gi,"[redacted]").slice(0,220)}; }
   }
+  try { const d=await duckDuckGoSearch('FINDO test',{kind:'product',coreTerms:['FINDO'],terms:['FINDO']},[]); out.duckDuckGoLive={ok:(d.results||[]).length>0,results:(d.results||[]).length,error:d.providerError||null}; } catch(e){ out.duckDuckGoLive={ok:false,error:String(e?.message||e).slice(0,220)}; }
   if(gk.length){
     try { const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent((process.env.GEMINI_MODEL||"gemini-3.6-flash").trim())+":generateContent?key="+encodeURIComponent(gk[0]),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{parts:[{text:"Reply only OK"}]}]})}); const txt=await r.text(); out.geminiLive={ok:r.ok,status:r.status}; if(!r.ok) out.geminiLive.error=txt.slice(0,220).replace(/AIza[0-9A-Za-z_-]+|AQ\.[^\s\"]+/g,"[redacted]"); }
     catch(e){ out.geminiLive={ok:false,error:String(e?.message||e).slice(0,220)}; }
@@ -1186,24 +1187,41 @@ async function lookupBarcodeProduct(code) {
   return null;
 }
 
+async function duckDuckGoSearch(query, intent, domains=[]) {
+  const q=String(query||'').trim(); if(!q) return {results:[],providerError:'Query vuota'};
+  const suffix=(domains||[]).slice(0,10).map(d=>`site:${String(d).replace(/^www\./,'').split('/')[0]}`).join(' ');
+  const url=`https://html.duckduckgo.com/html/?q=${encodeURIComponent((q+' '+suffix).trim())}`;
+  const c=new AbortController(),t=setTimeout(()=>c.abort(),12000);
+  try{
+    const r=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0 (compatible; FINDO/10.14)'},signal:c.signal});
+    const html=await r.text(); if(!r.ok) throw new Error(`DuckDuckGo ${r.status}`);
+    const results=[]; const re=/<a[^>]+class=["']result__a["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi; let m;
+    while((m=re.exec(html)) && results.length<12){
+      let href=m[1].replace(/&amp;/g,'&'); try{const u=new URL(href,'https://html.duckduckgo.com'); const uddg=u.searchParams.get('uddg'); if(uddg) href=uddg;}catch{}
+      if(!/^https?:\/\//i.test(href)) continue;
+      const title=clean(m[2].replace(/<[^>]+>/g,' ')); const tail=html.slice(re.lastIndex,re.lastIndex+1800); const desc=clean(tail.replace(/<[^>]+>/g,' ')).slice(0,500);
+      const item=normalize({title:compactDescription(title,110),description:compactDescription(desc,260),url:href,source:hostOf(href),provider:'DuckDuckGo',kind:intent?.kind||'product',price:priceOf(`${title} ${desc}`,intent?.kind),rating:ratingOf(`${title} ${desc}`)});
+      if(kindEnforcement(item,intent)) results.push(item);
+    }
+    return {results:dedupe(results),answer:null};
+  }catch(e){return {results:[],providerError:String(e?.message||e).slice(0,220)};}finally{clearTimeout(t);}
+}
+
 async function exactWebSearch(query, intent, domains=[]) {
-  // 10.10: keep the provider workload bounded. The previous version launched
-  // dozens of Tavily calls in parallel for one search, which could trigger 429
-  // rate limits and make FINDO appear to return no results.
-  const isPrecise=String(query||'').includes('\"') || domains.length>0;
+  const isPrecise=String(query||'').includes('"') || domains.length>0;
   const body={query,search_depth:isPrecise?'advanced':'basic',max_results:isPrecise?8:10,include_answer:false,include_raw_content:false,topic:'general'};
   if(domains.length) body.include_domains=domains.slice(0,80);
   if(intent?.country) body.country=String(intent.country).toLowerCase();
-  let d;
-  try { d=await tavilyFetch(body,15000,3); }
-  catch(e) { try { d=await tavilyFetch({...body,search_depth:'basic',max_results:10},12000,2); } catch(e2) { return {results:[],answer:null,providerError:String(e2.message||e.message||'Tavily non disponibile').replace(/tvly-[^\s]+/gi,'[redacted]').slice(0,220)}; } }
-  const out=[];
-  for(const x of (d.results||[])){
-    const txt=`${x.title||""} ${x.content||""}`;
-    const c=normalize({title:compactDescription(x.title,110),description:compactDescription(x.content,260),url:x.url,source:hostOf(x.url),provider:"Tavily",kind:intent.kind||"product",price:priceOf(txt,intent.kind),rating:ratingOf(txt)});
-    if(kindEnforcement(c,intent)) out.push(c);
+  try{
+    const d=await tavilyFetch(body,15000,3); const out=[];
+    for(const x of (d.results||[])){const txt=`${x.title||''} ${x.content||''}`; const c=normalize({title:compactDescription(x.title,110),description:compactDescription(x.content,260),url:x.url,source:hostOf(x.url),provider:'Tavily',kind:intent.kind||'product',price:priceOf(txt,intent.kind),rating:ratingOf(txt)}); if(kindEnforcement(c,intent)) out.push(c);}
+    return {results:dedupe(out),answer:null,provider:'Tavily'};
+  }catch(e){
+    const tvErr=String(e?.message||'Tavily non disponibile').replace(/tvly-[^\s]+/gi,'[redacted]');
+    const ddg=await duckDuckGoSearch(query,intent,domains);
+    if(ddg.results?.length) return {...ddg,providerFallback:'Tavily'};
+    return {results:[],answer:null,providerError:tvErr+(ddg.providerError?` | fallback: ${ddg.providerError}`:'')};
   }
-  return {results:dedupe(out),answer:null};
 }
 
 // ── Visual Search: identify image, then search the web for matching products ──
