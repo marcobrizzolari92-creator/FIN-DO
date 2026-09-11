@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.17.0-PRO";
+const VERSION = "10.18.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -875,6 +875,71 @@ const VEHICLE_MARKET_DOMAINS = [
   "cars.com","autotrader.com","carfax.com","truecar.com","cargurus.com","cars.co.uk",
   "motors.co.uk","mobile.de","leboncoin.fr","lacentrale.fr","coches.net","wallapop.com"
 ];
+const UNIVERSAL_MARKET_DOMAINS = {
+  car: VEHICLE_MARKET_DOMAINS,
+  motorcycle: VEHICLE_MARKET_DOMAINS,
+  product: ["amazon.it","ebay.it","subito.it","vinted.it","facebook.com","etsy.com","mediaworld.it","unieuro.it","eprice.it","trovaprezzi.it","idealo.it","kelkoo.it","backmarket.it","zalando.it","decathlon.it","manomano.it","aliexpress.com","temu.com","walmart.com","target.com","bestbuy.com","mercari.com","rakuten.com"],
+  realestate: ["immobiliare.it","idealista.it","casa.it","subito.it","immobiliare.com","wikicasa.it","cercacasa.it","trovacasa.it","gate-away.com","idealista.com","rightmove.co.uk","zillow.com","realtor.com","remax.com"],
+  job: ["indeed.it","indeed.com","infojobs.it","linkedin.com","jooble.org","monster.it","glassdoor.com","adzuna.it","careerjet.it","jobrapido.com","ziprecruiter.com"],
+  hotel: ["booking.com","expedia.com","hotels.com","trivago.it","trivago.com","kayak.com","agoda.com","airbnb.com"],
+  flight: ["skyscanner.it","skyscanner.com","kayak.com","google.com","expedia.com","kiwi.com","momondo.it","volagratis.com"],
+  restaurant: ["tripadvisor.it","tripadvisor.com","thefork.it","google.com","paginegialle.it","yelp.com","restaurantguru.it"],
+  services: ["prontopro.it","instapro.it","starofservice.com","paginegialle.it","subito.it","facebook.com","yelp.com"]
+};
+function marketDomainsFor(kind,country="IT"){
+  const base=UNIVERSAL_MARKET_DOMAINS[kind]||GLOBAL_SHOPPING_DOMAINS;
+  const local=localProfile(country)?.domains||[];
+  return [...new Set([...base,...local].map(x=>String(x).split('/')[0].replace(/^www\./,'')))];
+}
+function searchVariants(q,intent,kind){
+  const original=clean(q);
+  const core=(intent.vehicleModel||intent.requiredPhrases?.[0]||intent.coreTerms?.join(' ')||original).trim();
+  const loc=intent.city?` ${intent.city}`:'';
+  const constraints=[
+    intent.used?' usato': '',
+    intent.maxMileage!=null?` meno di ${intent.maxMileage} km`:'',
+    intent.maxPrice!=null?` sotto ${intent.maxPrice} euro`:'',
+    intent.minYear!=null?` dal ${intent.minYear}`:'',
+    intent.fuel?` ${intent.fuel}`:'',
+    intent.transmission?` ${intent.transmission}`:''
+  ].join('');
+  const neg = kind==='car'||kind==='motorcycle' ? ' -channel -tv -televisione -documentario -streaming -serie' : '';
+  const list=[
+    `"${core}"${constraints}${loc} vendita annuncio${neg}`,
+    `"${core}"${constraints}${loc} usato prezzo${neg}`,
+    `"${core}"${constraints}${loc} buy sale price${neg}`
+  ];
+  if(original.toLowerCase()!==core.toLowerCase()) list.push(`"${original.replace(/\s+/g,' ').trim()}"${loc}${neg}`);
+  return [...new Set(list.map(x=>x.replace(/\s+/g,' ').trim()))].slice(0,4);
+}
+function hardRelevant(x,intent){
+  const title=clean(x.title).toLowerCase();
+  const text=`${title} ${clean(x.description)} ${clean(x.url)}`.toLowerCase();
+  const kind=intent.kind;
+  const req=[...(intent.requiredPhrases||[]), ...(intent.vehicleModel?[intent.vehicleModel]:[])].map(clean).filter(Boolean).map(x=>x.toLowerCase());
+  if(req.length && !req.some(r=>title.includes(r) || text.includes(r))) return false;
+  if(kind==='car'||kind==='motorcycle'){
+    if(/(discovery\s+channel|channel|canale|televisione|documentario|documentary|streaming|serie\s+tv|episodio|programma tv)/i.test(text)) return false;
+    if(!/(auto|macchina|automobile|vehicle|car|moto|motorcycle|suv|km|chilometr|diesel|benzina|elettric|annuncio|vendita|usata|usato|concessionar)/i.test(text)) return false;
+    if(intent.maxMileage!=null){const km=x.mileage!=null?Number(x.mileage):extractMileage(text); if(km==null||km>intent.maxMileage)return false;}
+    if(intent.maxPrice!=null){const pp=x.price!=null?Number(x.price):priceOf(text,kind); if(pp==null||pp>intent.maxPrice)return false;}
+    if(intent.minYear!=null){const yy=extractYear(text); if(yy!=null&&yy<intent.minYear)return false;}
+  }
+  if(kind==='realestate'){
+    if(!/(casa|appartamento|villa|immobile|immobiliare|monolocale|bilocale|trilocale|quadrilocale|mq|m²|affitto|vendita|rent|sale|property|house|apartment)/i.test(text)) return false;
+    if(intent.maxPrice!=null){const pp=x.price!=null?Number(x.price):priceOf(text,kind); if(pp==null||pp>intent.maxPrice)return false;}
+  }
+  if(kind==='job'){
+    if(!/(lavoro|offerta|assunzione|posizione|impiego|career|job|recruit|stage|tirocinio|salary|stipendio)/i.test(text)) return false;
+  }
+  if(kind==='product'){
+    if(/(ristorante|hotel|volo|lavoro|immobile|affitto casa)/i.test(text)) return false;
+    const terms=(intent.coreTerms||[]).map(clean).filter(t=>t.length>=3);
+    if(terms.length){const hits=terms.filter(t=>text.includes(t.toLowerCase())).length; if(hits<Math.max(1,Math.ceil(terms.length*.5))) return false;}
+  }
+  return true;
+}
+
 const GLOBAL_SHOPPING_DOMAINS = [
   "facebook.com","facebook.com/marketplace","amazon.it","amazon.com","amazon.de","amazon.fr","amazon.es","amazon.co.uk","amazon.nl","amazon.pl","amazon.co.jp",
   "ebay.it","ebay.com","ebay.de","ebay.fr","ebay.co.uk","ebay.es","vinted.it","vinted.com","subito.it","etsy.com","aliexpress.com","temu.com",
@@ -914,62 +979,38 @@ async function searchSection(q, section, lat, lon, country="IT"){
   }
   intent.section=section;
   intent.country=country;
-  let webResult={results:[],aiAnswer:null};
-  if(section==='shopping') {
-    if(kind==='product'||kind==='car'||kind==='motorcycle') {
-      const local=localProfile(country);
-      const marketBase=(kind==='car'||kind==='motorcycle') ? VEHICLE_MARKET_DOMAINS : [...local.domains,"facebook.com/marketplace","subito.it","vinted.it"];
-      const localDomains=[...new Set([...marketBase,...local.domains].filter(Boolean))].filter((v,i,a)=>a.indexOf(v)===i);
-      // Search the highest-value local + vehicle marketplaces first, then broaden globally.
-      // Do NOT fire one Tavily request per marketplace: that was the main source
-      // of rate-limit failures in 10.9. Tavily accepts many include_domains in a
-      // single request, so local + global coverage can be obtained with 4 calls.
-      const localUnique=[...new Set(localDomains.map(x=>String(x).split('/')[0].replace(/^www\./,'')))];
-      const globalUnique=[...new Set(GLOBAL_SHOPPING_DOMAINS.map(x=>String(x).split('/')[0]))];
-      const exactVehicle=intent.vehicleModel ? `"${intent.vehicleMake?intent.vehicleMake+' ':''}${intent.vehicleModel}"` : `"${q}"`;
-      const localHint=intent.city ? ` ${intent.city}` : '';
-      const preciseQueries=[`${exactVehicle} usata${intent.maxMileage?` sotto ${intent.maxMileage} km`:''}${localHint} vendita annuncio`,`${exactVehicle} used for sale${intent.maxMileage?` under ${intent.maxMileage} km`:''}${localHint}`];
-      const requests=[
-        exactWebSearch(preciseQueries[0],intent,localUnique),
-        exactWebSearch(preciseQueries[1],intent,localUnique),
-        exactWebSearch(`${exactVehicle} ${intent.city||''} prezzo km vendita annuncio`,intent,[])
-      ];
-      // One global fallback is only launched if the first bounded set is weak.
-      const ss=await Promise.allSettled(requests);
-      let found=dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
-      const providerErrors=ss.flatMap(x=>x.status==='fulfilled'&&x.value?.providerError?[x.value.providerError]:[]);
-      if(found.length<8){
-        try{
-          const g=await exactWebSearch(`${exactVehicle} ${intent.city||''} used for sale price`,intent,(kind==='car'||kind==='motorcycle')?[...new Set(VEHICLE_MARKET_DOMAINS)]:globalUnique);
-          found=dedupe([...found,...(g.results||[])]);
-          if(g.providerError) providerErrors.push(g.providerError);
-        }catch(e){ providerErrors.push(String(e?.message||e).slice(0,180)); }
-      }
-      // Last-resort provider call without domain filters. This avoids returning a
-      // blank screen when a marketplace/domain filter is rejected by the provider.
-      if(found.length===0){
-        try{
-          const g2=await exactWebSearch(`${exactVehicle} ${intent.city||''} vendita usata prezzo km`,intent,[]);
-          found=dedupe(g2.results||[]);
-          if(g2.providerError) providerErrors.push(g2.providerError);
-        }catch(e){ providerErrors.push(String(e?.message||e).slice(0,180)); }
-      }
-      webResult={results:found,aiAnswer:null,providerErrors:[...new Set(providerErrors)].slice(0,3)};
-    } else webResult=await tavilySearch(sectionSearchQuery(q,spec),intent,{name:"Shopping Web",domains:spec.domains});
-  } else if(section==='jobs'||section==='homes') {
-    webResult=await multiSourceWeb(q,intent);
-  } else if(section==='experiences') {
-    const qs=[
-      exactWebSearch(`"${q}" esperienza attività evento tour prenotazione`,intent,spec.domains),
-      exactWebSearch(`${q} attività da fare esperienza tour evento`,intent,spec.domains),
-      exactWebSearch(`${q} experience activity tour event booking`,intent,spec.domains),
-      exactWebSearch(`${q} ${localProfile(country).name} esperienza`,intent,[])
-    ];
-    const ss=await Promise.allSettled(qs);
-    webResult={results:dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[])),aiAnswer:null};
-  } else {
-    webResult=await tavilySearch(sectionSearchQuery(q,spec),intent,{name:spec.label,domains:spec.domains});
+  let webResult={results:[],aiAnswer:null,providerErrors:[]};
+  const domains=marketDomainsFor(kind,country);
+  const variants=searchVariants(q,intent,kind);
+  const localDomains=domains.slice(0,32);
+  const globalDomains=domains.slice(32,80);
+  const searches=[];
+  for(const v of variants.slice(0,3)){
+    searches.push(exactWebSearch(v,intent,localDomains));
   }
+  // Always perform one broad search without site restrictions. This is essential
+  // because marketplaces frequently expose the actual listing through a different
+  // host/subdomain than their main domain.
+  searches.push(exactWebSearch(variants[0]||q,intent,[]));
+  if(globalDomains.length) searches.push(exactWebSearch(variants[1]||q,intent,globalDomains));
+  const ss=await Promise.allSettled(searches);
+  let found=dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
+  webResult.providerErrors=ss.flatMap(x=>x.status==='fulfilled'&&x.value?.providerError?[x.value.providerError]:[]).slice(0,5);
+  // Apply hard intent constraints BEFORE ranking, not after ranking.
+  found=found.filter(x=>hardRelevant(x,intent));
+  // If strict filtering removes everything, do a second search using the exact
+  // required phrase and category vocabulary, never the raw ambiguous query alone.
+  if(!found.length){
+    const rescueQ=kind==='car'||kind==='motorcycle'
+      ? `"${intent.vehicleModel||intent.coreTerms.join(' ')}" auto usata vendita${intent.city?' '+intent.city:''} -channel -tv -documentario`
+      : `"${intent.requiredPhrases?.[0]||intent.coreTerms.join(' ')}" ${kind} ${intent.city||''}`;
+    try{
+      const rr=await exactWebSearch(rescueQ,intent,[]);
+      found=dedupe(rr.results||[]).filter(x=>hardRelevant(x,intent));
+      if(rr.providerError) webResult.providerErrors.push(rr.providerError);
+    }catch{}
+  }
+  webResult.results=found;
   let raw=[...(webResult.results||[])];
   if(section==='places' && lat!=null && lon!=null){
     try{ raw.push(...await places(q,lat,lon,intent)); }catch{}
@@ -992,7 +1033,7 @@ async function searchSection(q, section, lat, lon, country="IT"){
   const enriched=await enrichResultMetadata(ranked, section==='shopping'?8:8);
   await enrichDistances(enriched,lat,lon);
   let finalResults=rank(enriched,intent);
-  if(!finalResults.length && providerHealth().tavily.configured){
+  if(!finalResults.length){
     try{ const rescue=await exactWebSearch(`"${q}" ${section==='shopping'?'prezzo acquisto annuncio prodotto':'Italia'}`,intent,[]); const rr=await enrichResultMetadata(rank(dedupe(rescue.results||[]),intent),section==='shopping'?4:4); await enrichDistances(rr,lat,lon); finalResults=rank(rr,intent); }catch{}
   }
   return {results:finalResults,kind,aiAnswer:webResult.aiAnswer||null,intent};
