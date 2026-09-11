@@ -1187,24 +1187,45 @@ async function lookupBarcodeProduct(code) {
   return null;
 }
 
-async function duckDuckGoSearch(query, intent, domains=[]) {
+async function parseHtmlSearchResults(html, engine, intent){
+  const results=[];
+  const push=(href,title,desc='')=>{
+    try{ href=decodeURIComponent(String(href||'').replace(/&amp;/g,'&')); }catch{}
+    if(href.startsWith('//')) href='https:'+href;
+    if(!/^https?:\/\//i.test(href)) return;
+    if(/^(https?:\/\/)?(www\.)?(google|bing|duckduckgo)\./i.test(href)) return;
+    const cleanTitle=clean(String(title||'').replace(/<[^>]+>/g,' '));
+    if(!cleanTitle) return;
+    const item=normalize({title:compactDescription(cleanTitle,110),description:compactDescription(clean(String(desc||'').replace(/<[^>]+>/g,' ')),260),url:href,source:hostOf(href),provider:engine,kind:intent?.kind||'product',price:priceOf(`${cleanTitle} ${desc}`,intent?.kind),rating:ratingOf(`${cleanTitle} ${desc}`)});
+    results.push(item);
+  };
+  let m;
+  // DuckDuckGo HTML: tolerate attribute order and class placement.
+  const d=/<a\b[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  while((m=d.exec(html)) && results.length<12){ const tail=html.slice(d.lastIndex,d.lastIndex+1800); push(m[1],m[2],tail); }
+  if(results.length) return dedupe(results).slice(0,12);
+  // DuckDuckGo Lite has a different, much simpler markup.
+  const l=/<a\b[^>]*class=["'][^"']*result-link[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  while((m=l.exec(html)) && results.length<12){ const tail=html.slice(l.lastIndex,l.lastIndex+1200); push(m[1],m[2],tail); }
+  return dedupe(results).slice(0,12);
+}
+
+async function fetchHtmlSearch(url, engine, intent, timeoutMs=10000){
+  const c=new AbortController(),t=setTimeout(()=>c.abort(),timeoutMs);
+  try{ const r=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153 Safari/537.36','Accept-Language':'it-IT,it;q=0.9,en;q=0.8'},signal:c.signal}); const html=await r.text(); if(!r.ok) throw new Error(`${engine} ${r.status}`); return {results:await parseHtmlSearchResults(html,engine,intent)}; }
+  catch(e){ return {results:[],providerError:String(e?.message||e).slice(0,220)}; }
+  finally{clearTimeout(t)}
+}
+
+async function duckDuckGoSearch(query, intent, domains=[]){
   const q=String(query||'').trim(); if(!q) return {results:[],providerError:'Query vuota'};
-  const suffix=(domains||[]).slice(0,10).map(d=>`site:${String(d).replace(/^www\./,'').split('/')[0]}`).join(' ');
-  const url=`https://html.duckduckgo.com/html/?q=${encodeURIComponent((q+' '+suffix).trim())}`;
-  const c=new AbortController(),t=setTimeout(()=>c.abort(),12000);
-  try{
-    const r=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0 (compatible; FINDO/10.14)'},signal:c.signal});
-    const html=await r.text(); if(!r.ok) throw new Error(`DuckDuckGo ${r.status}`);
-    const results=[]; const re=/<a[^>]+class=["']result__a["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi; let m;
-    while((m=re.exec(html)) && results.length<12){
-      let href=m[1].replace(/&amp;/g,'&'); try{const u=new URL(href,'https://html.duckduckgo.com'); const uddg=u.searchParams.get('uddg'); if(uddg) href=uddg;}catch{}
-      if(!/^https?:\/\//i.test(href)) continue;
-      const title=clean(m[2].replace(/<[^>]+>/g,' ')); const tail=html.slice(re.lastIndex,re.lastIndex+1800); const desc=clean(tail.replace(/<[^>]+>/g,' ')).slice(0,500);
-      const item=normalize({title:compactDescription(title,110),description:compactDescription(desc,260),url:href,source:hostOf(href),provider:'DuckDuckGo',kind:intent?.kind||'product',price:priceOf(`${title} ${desc}`,intent?.kind),rating:ratingOf(`${title} ${desc}`)});
-      if(kindEnforcement(item,intent)) results.push(item);
-    }
-    return {results:dedupe(results),answer:null};
-  }catch(e){return {results:[],providerError:String(e?.message||e).slice(0,220)};}finally{clearTimeout(t);}
+  const suffix=(domains||[]).slice(0,8).map(d=>`site:${String(d).replace(/^www\./,'').split('/')[0]}`).join(' ');
+  const full=(q+' '+suffix).trim();
+  const a=await fetchHtmlSearch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(full)}`,'DuckDuckGo',intent);
+  if(a.results.length) return a;
+  const b=await fetchHtmlSearch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(full)}`,'DuckDuckGo Lite',intent);
+  if(b.results.length) return b;
+  return {results:[],providerError:[a.providerError,b.providerError].filter(Boolean).join(' | ')||'Nessun risultato DuckDuckGo'};
 }
 
 async function exactWebSearch(query, intent, domains=[]) {
@@ -1220,7 +1241,9 @@ async function exactWebSearch(query, intent, domains=[]) {
     const tvErr=String(e?.message||'Tavily non disponibile').replace(/tvly-[^\s]+/gi,'[redacted]');
     const ddg=await duckDuckGoSearch(query,intent,domains);
     if(ddg.results?.length) return {...ddg,providerFallback:'Tavily'};
-    return {results:[],answer:null,providerError:tvErr+(ddg.providerError?` | fallback: ${ddg.providerError}`:'')};
+    const ddgWide=domains?.length ? await duckDuckGoSearch(query,intent,[]) : null;
+    if(ddgWide?.results?.length) return {...ddgWide,providerFallback:'Tavily'};
+    return {results:[],answer:null,providerError:tvErr+(ddg.providerError?` | fallback: ${ddg.providerError}`:'')+(ddgWide?.providerError?` | wide: ${ddgWide.providerError}`:'')};
   }
 }
 
