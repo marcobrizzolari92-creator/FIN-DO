@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.9.0-PRO";
+const VERSION = "10.11.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -837,10 +837,29 @@ async function searchSection(q, section, lat, lon, country="IT"){
     if(kind==='product'||kind==='car'||kind==='motorcycle') {
       const local=localProfile(country);
       const localDomains=[...local.domains,"facebook.com/marketplace","subito.it","vinted.it"].filter((v,i,a)=>a.indexOf(v)===i);
-      const preciseQueries=[`"${q}" comprare prezzo online`, `"${q}" buy price online`, `${q} prezzo offerta acquisto`, `site:facebook.com/marketplace ${q} buy sale`];
-      const qs=[...preciseQueries.map(qq=>exactWebSearch(qq,intent,[])), ...localDomains.map(d=>exactWebSearch(`${q} buy price`,intent,[d])), ...GLOBAL_SHOPPING_BATCHES.map(dom=>exactWebSearch(`${q} buy price online`,intent,dom))];
-      const ss=await Promise.allSettled(qs);
-      webResult={results:dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[])),aiAnswer:null};
+      // 10.10: search broadly with a small bounded set of high-value requests.
+      // Do NOT fire one Tavily request per marketplace: that was the main source
+      // of rate-limit failures in 10.9. Tavily accepts many include_domains in a
+      // single request, so local + global coverage can be obtained with 4 calls.
+      const localUnique=[...new Set(localDomains.map(x=>String(x).split('/')[0].replace(/^www\./,'')))];
+      const globalUnique=[...new Set(GLOBAL_SHOPPING_DOMAINS.map(x=>String(x).split('/')[0]))];
+      const preciseQueries=[`"${q}" comprare prezzo online`,`"${q}" buy price online`];
+      const requests=[
+        exactWebSearch(preciseQueries[0],intent,localUnique),
+        exactWebSearch(preciseQueries[1],intent,localUnique),
+        exactWebSearch(`${q} prezzo offerta acquisto`,intent,[]),
+        exactWebSearch(`site:facebook.com/marketplace ${q} buy sale`,intent,['facebook.com'])
+      ];
+      // One global fallback is only launched if the first bounded set is weak.
+      const ss=await Promise.allSettled(requests);
+      let found=dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
+      if(found.length<8){
+        try{
+          const g=await exactWebSearch(`"${q}" buy price online`,intent,globalUnique);
+          found=dedupe([...found,...(g.results||[])]);
+        }catch{}
+      }
+      webResult={results:found,aiAnswer:null};
     } else webResult=await tavilySearch(sectionSearchQuery(q,spec),intent,{name:"Shopping Web",domains:spec.domains});
   } else if(section==='jobs'||section==='homes') {
     webResult=await multiSourceWeb(q,intent);
@@ -901,7 +920,22 @@ app.post("/api/learn", (req,res)=>{
   } catch(e){ res.status(500).json({error:"Apprendimento non disponibile"}); }
 });
 
-app.get("/api/health", (req, res) => res.json({
+app.get("/api/diagnostics", async (req, res) => {
+  const tk = providerKeys(process.env.TAVILY_API_KEY,"TAVILY_API_KEYS");
+  const gk = providerKeys(process.env.GEMINI_API_KEY||process.env.GOOGLE_GEMINI_API_KEY,"GEMINI_API_KEYS");
+  const out = {version:VERSION, vercel:process.env.VERCEL === "1", tavilyConfigured:tk.length>0, geminiConfigured:gk.length>0, tavilyLive:null, geminiLive:null};
+  if(tk.length){
+    try { const d=await tavilyFetch({query:"test",search_depth:"basic",max_results:1,include_answer:false,include_raw_content:false,topic:"general"},8000,1); out.tavilyLive={ok:true,results:Array.isArray(d.results)?d.results.length:0}; }
+    catch(e){ out.tavilyLive={ok:false,error:String(e?.message||e).replace(/tvly-[^\s]+/gi,"[redacted]").slice(0,220)}; }
+  }
+  if(gk.length){
+    try { const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent((process.env.GEMINI_MODEL||"gemini-3.6-flash").trim())+":generateContent?key="+encodeURIComponent(gk[0]),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{parts:[{text:"Reply only OK"}]}]})}); const txt=await r.text(); out.geminiLive={ok:r.ok,status:r.status}; if(!r.ok) out.geminiLive.error=txt.slice(0,220).replace(/AIza[0-9A-Za-z_-]+|AQ\.[^\s\"]+/g,"[redacted]"); }
+    catch(e){ out.geminiLive={ok:false,error:String(e?.message||e).slice(0,220)}; }
+  }
+  res.json(out);
+});
+
+app.get("/api/health", async (req, res) => res.json({
   ok: true, version: VERSION,
   geminiModels: (process.env.GEMINI_MODELS||process.env.GEMINI_MODEL||"gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash").split(",").map(clean).filter(Boolean),
   providers: {web:providerHealth().tavily.configured,places:!!process.env.GOOGLE_MAPS_API_KEY,flights:!!(process.env.AMADEUS_CLIENT_ID&&process.env.AMADEUS_CLIENT_SECRET),gemini:providerHealth().gemini.configured}, providerHealth:providerHealth()
@@ -1141,11 +1175,16 @@ async function lookupBarcodeProduct(code) {
 }
 
 async function exactWebSearch(query, intent, domains=[]) {
-  const body={query,search_depth:"advanced",max_results:10,include_answer:false,include_raw_content:false};
-  if(domains.length) body.include_domains=domains;
+  // 10.10: keep the provider workload bounded. The previous version launched
+  // dozens of Tavily calls in parallel for one search, which could trigger 429
+  // rate limits and make FINDO appear to return no results.
+  const isPrecise=String(query||'').includes('\"') || domains.length>0;
+  const body={query,search_depth:isPrecise?'advanced':'basic',max_results:isPrecise?8:10,include_answer:false,include_raw_content:false,topic:'general'};
+  if(domains.length) body.include_domains=domains.slice(0,80);
+  if(intent?.country) body.country=String(intent.country).toLowerCase();
   let d;
   try { d=await tavilyFetch(body,15000,3); }
-  catch(e) { try { d=await tavilyFetch({...body,search_depth:"basic",max_results:8},12000,2); } catch(e2) { return {results:[],answer:null,providerError:String(e2.message||e.message||'Tavily non disponibile').slice(0,220)}; } }
+  catch(e) { try { d=await tavilyFetch({...body,search_depth:'basic',max_results:10},12000,2); } catch(e2) { return {results:[],answer:null,providerError:String(e2.message||e.message||'Tavily non disponibile').slice(0,220)}; } }
   const out=[];
   for(const x of (d.results||[])){
     const txt=`${x.title||""} ${x.content||""}`;
@@ -1237,7 +1276,7 @@ app.get("/api/barcode", async (req, res) => {
     const intent={kind:"product",original:baseName||code,near:false,openNow:false,cheap:true,expensive:false,maxPrice:null,city:null,terms:[code,...(baseName?baseName.split(/\s+/):[])],coreTerms:[code,...(baseName?baseName.split(/\s+/):[])],sort:"price"};
     const results=[]; let aiAnswer=null;
     const queries=[[`"${code}" ${baseName} buy price online`,[]],[`EAN ${code} ${baseName} buy shop worldwide`,[]],...GLOBAL_SHOPPING_BATCHES.map(dom=>[`"${code}" ${baseName} buy price`,dom])];
-    if(process.env.TAVILY_API_KEY){
+    if(providerKeys(process.env.TAVILY_API_KEY,'TAVILY_API_KEYS').length){
       const settled=await Promise.all(queries.map(([q,domains])=>exactWebSearch(q,intent,domains)));
       for(const s of settled) results.push(...s.results);
     }
