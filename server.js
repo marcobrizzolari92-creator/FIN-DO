@@ -853,13 +853,24 @@ async function searchSection(q, section, lat, lon, country="IT"){
       // One global fallback is only launched if the first bounded set is weak.
       const ss=await Promise.allSettled(requests);
       let found=dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
+      const providerErrors=ss.flatMap(x=>x.status==='fulfilled'&&x.value?.providerError?[x.value.providerError]:[]);
       if(found.length<8){
         try{
           const g=await exactWebSearch(`"${q}" buy price online`,intent,globalUnique);
           found=dedupe([...found,...(g.results||[])]);
-        }catch{}
+          if(g.providerError) providerErrors.push(g.providerError);
+        }catch(e){ providerErrors.push(String(e?.message||e).slice(0,180)); }
       }
-      webResult={results:found,aiAnswer:null};
+      // Last-resort provider call without domain filters. This avoids returning a
+      // blank screen when a marketplace/domain filter is rejected by the provider.
+      if(found.length===0){
+        try{
+          const g2=await exactWebSearch(`${q} prezzo comprare online`,intent,[]);
+          found=dedupe(g2.results||[]);
+          if(g2.providerError) providerErrors.push(g2.providerError);
+        }catch(e){ providerErrors.push(String(e?.message||e).slice(0,180)); }
+      }
+      webResult={results:found,aiAnswer:null,providerErrors:[...new Set(providerErrors)].slice(0,3)};
     } else webResult=await tavilySearch(sectionSearchQuery(q,spec),intent,{name:"Shopping Web",domains:spec.domains});
   } else if(section==='jobs'||section==='homes') {
     webResult=await multiSourceWeb(q,intent);
@@ -963,7 +974,7 @@ app.get("/api/search", async (req, res) => {
       intent.country=country;
       const payload={results:out.results||[],aiAnswer:out.aiAnswer||null,intent,section:initialSection,sectionLabel:spec.label,sectionIcon:spec.icon,country,availableSections:Object.entries(SEARCH_SECTIONS).map(([id,v])=>({id,label:v.label,icon:v.icon}))};
       recordPriceHistory(payload.results);
-      cacheSet(cacheKey,payload);
+      if(payload.results.length>0) cacheSet(cacheKey,payload);
       return res.json(payload);
     } catch(e) {
       console.error("section search:",section,e);
@@ -1184,7 +1195,7 @@ async function exactWebSearch(query, intent, domains=[]) {
   if(intent?.country) body.country=String(intent.country).toLowerCase();
   let d;
   try { d=await tavilyFetch(body,15000,3); }
-  catch(e) { try { d=await tavilyFetch({...body,search_depth:'basic',max_results:10},12000,2); } catch(e2) { return {results:[],answer:null,providerError:String(e2.message||e.message||'Tavily non disponibile').slice(0,220)}; } }
+  catch(e) { try { d=await tavilyFetch({...body,search_depth:'basic',max_results:10},12000,2); } catch(e2) { return {results:[],answer:null,providerError:String(e2.message||e.message||'Tavily non disponibile').replace(/tvly-[^\s]+/gi,'[redacted]').slice(0,220)}; } }
   const out=[];
   for(const x of (d.results||[])){
     const txt=`${x.title||""} ${x.content||""}`;
