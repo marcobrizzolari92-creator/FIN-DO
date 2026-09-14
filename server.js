@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "11.2.0-PRO";
+const VERSION = "11.3.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -238,7 +238,7 @@ function kindEnforcement(x, intent) {
   }
   if (kind==='restaurant') { if (/\b(auto|macchina|motor[io]|veicolo|moto|usata|usato|km\s*0|diesel|benzina|cilindrata|concessionar|prenota\s+volo|voli|flight|hotel\s+room|noleggio|leasing|smartphone|iphone|tv|laptop)\b/i.test(text)) return false; }
   if (kind==='hotel') { if (/\b(auto|macchina|motor[io]|veicolo|moto|usata|usato|km\s*0|diesel|benzina|cilindrata|concessionar|voli|flight|noleggio|leasing|ristorante\s+recensione|smartphone|iphone|tv)\b/i.test(text)) return false; }
-  if (kind==='product') { if (/\b(ristorante|pizzeria|hotel|albergo|volo|voli|usata|usato|diesel|benzina|cilindrata|farmacia|distributore|noleggio|leasing|affitt|camera|cena|mangiare)\b/i.test(text)) return false; }
+  if (kind==='product') { if (/\b(ristorante|pizzeria|hotel|albergo|volo|voli|diesel|benzina|cilindrata|farmacia|distributore|noleggio|leasing|affitt|camera|cena|mangiare)\b/i.test(text)) return false; }
   if (kind==='flight') { if (/\b(ristorante|pizzeria|hotel|albergo|auto|macchina|motor[io]|farmacia|distributore|smartphone|iphone|tv|noleggio|leasing)\b/i.test(text)) return false; }
   if (kind==='job') { if (/\b(auto\s+usata|macchina|motor[io]|volo|hotel|ristorante|pizzeria|farmacia|distributore|noleggio|leasing|compra|vendita\s+auto)\b/i.test(text)) return false; }
   if (kind==='realestate') { if (/\b(auto|macchina|motor[io]|volo|ristorante|pizzeria|farmacia|distributore|smartphone|iphone|tv|noleggio|leasing|auto\s+usata)\b/i.test(text)) return false; }
@@ -319,17 +319,18 @@ function normalize(x) {
 // canonical metadata is safer than blindly opening the first indexed URL.
 function looksLikeSearchPage(url){
   const u=String(url||'').toLowerCase();
-  // Marketplace/product-collection pages are NOT individual offers. In
-  // particular eBay /p/ pages aggregate many sellers and must be treated as
-  // search pages unless they carry an individual /itm/ destination.
-  // /annunci/ and /offerte/ are individual-listing paths on major marketplaces.
-  // Only explicit search/category/collection paths are treated as generic pages.
-  return /(?:[?&](?:q|query|search|keyword|text|filter|page|sort|order|_nkw)=)|\/(?:search|ricerca|search-results|results|listing|listings|catalog|category|categorie|inventory|vehicles|cars|auto|marketplace)(?:[/?#]|$)|\/marketplace(?:[/?#]|$)|\/p\/\d+(?:[/?#]|$)|\/gp\/search(?:[/?#]|$)|\/s\?(?:[^#]*&)??k=/i.test(u);
+  if(!/^https?:\/\//.test(u)) return true;
+  if(/(?:[?&](?:q|query|search|keyword|text|filter|page|sort|order|_nkw)=)/i.test(u)) return true;
+  if(/\/(?:search|ricerca|search-results|results|catalog|category|categorie|inventory|vehicles|cars)(?:[\/?#]|$)/i.test(u)) return true;
+  if(/\/marketplace(?:[\/?#]|$)/i.test(u) && !/\/marketplace\/item\//i.test(u)) return true;
+  if(/\/p\/\d+(?:[\/?#]|$)/i.test(u)) return true;
+  if(/\/gp\/search(?:[\/?#]|$)/i.test(u)) return true;
+  if(/\/s\?(?:[^#]*&)??k=/i.test(u)) return true;
+  return false;
 }
 function looksLikeDirectListing(url){
   const u=String(url||'').toLowerCase();
-  if(!/^https?:\/\//.test(u) || looksLikeSearchPage(u)) return false;
-  // Known marketplaces: accept only their individual listing/product forms.
+  if(!/^https?:\/\//.test(u)) return false;
   if(/(?:^|\.)subito\.[^/]+\/annunci\//i.test(u)) return true;
   if(/(?:^|\.)vinted\.[^/]+\/items\//i.test(u)) return true;
   if(/(?:^|\.)ebay\.[^/]+\/itm\//i.test(u)) return true;
@@ -337,18 +338,20 @@ function looksLikeDirectListing(url){
   if(/(?:^|\.)facebook\.com\/marketplace\/item\//i.test(u)) return true;
   if(/(?:^|\.)autoscout24\.[^/]+\/(?:annunci|offerte)\//i.test(u)) return true;
   if(/(?:^|\.)automobile\.[^/]+\/(?:annunci|auto|offerte)\//i.test(u)) return true;
-  return /\/(?:annunci|offerte|offer|item|itm|product|products|dp|veicolo|vehicle|car|cars|moto|ad|ads)(?:[\/-]|[?]|$)/i.test(u)
+  if(looksLikeSearchPage(u)) return false;
+  return /\/(?:offer|item|itm|product|products|dp|veicolo|vehicle|car|moto|ad|ads)(?:[\/-]|[?]|$)/i.test(u)
     || /[a-f0-9]{8,}[-_][a-f0-9]{4,}/i.test(u);
 }
 function marketplaceSpecificUrl(url, host){
   const u=String(url||'').toLowerCase(); const h=String(host||hostOf(url)||'').toLowerCase();
-  if(!u || looksLikeSearchPage(u)) return false;
-  if(/(?:subito\.)/.test(h)) return /\/annunci\//.test(u);
-  if(/(?:vinted\.)/.test(h)) return /\/items\//.test(u);
-  if(/(?:ebay\.)/.test(h)) return /\/itm\//.test(u);
-  if(/(?:amazon\.)/.test(h)) return /\/(?:dp|gp\/product)\//.test(u);
+  if(!u || !/^https?:\/\//.test(u)) return false;
+  if(/subito\./.test(h)) return /\/annunci\//.test(u);
+  if(/vinted\./.test(h)) return /\/items\//.test(u);
+  if(/ebay\./.test(h)) return /\/itm\//.test(u);
+  if(/amazon\./.test(h)) return /\/(?:dp|gp\/product)\//.test(u);
   if(/facebook\.com/.test(h)) return /\/marketplace\/item\//.test(u);
   if(/autoscout24\./.test(h)) return /\/(?:annunci|offerte)\//.test(u);
+  if(/automobile\./.test(h)) return /\/(?:annunci|auto|offerte)\//.test(u);
   return looksLikeDirectListing(u);
 }
 
@@ -1509,7 +1512,7 @@ async function duckDuckGoSearch(query, intent, domains=[]){
 }
 
 async function fallbackWebSearch(query,intent,domains=[]){
-  const providers=[bingRssSearch,braveSearch];
+  const providers=[bingRssSearch,braveSearch,duckDuckGoSearch];
   const run=async(ds)=>{
     const settled=await Promise.allSettled(providers.map(fn=>fn(query,intent,ds)));
     const results=dedupe(settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
