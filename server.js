@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.21.0-PRO";
+const VERSION = "11.2.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -322,7 +322,9 @@ function looksLikeSearchPage(url){
   // Marketplace/product-collection pages are NOT individual offers. In
   // particular eBay /p/ pages aggregate many sellers and must be treated as
   // search pages unless they carry an individual /itm/ destination.
-  return /(?:[?&](?:q|query|search|keyword|text|filter|page|sort|order|_nkw)=)|\/(?:search|ricerca|search-results|results|listing|listings|catalog|category|categorie|inventory|vehicles|cars|auto|offerte|annunci|marketplace)(?:[/?#]|$)|\/marketplace(?:[/?#]|$)|\/p\/\d+(?:[/?#]|$)|\/gp\/search(?:[/?#]|$)|\/s\?(?:[^#]*&)??k=/i.test(u);
+  // /annunci/ and /offerte/ are individual-listing paths on major marketplaces.
+  // Only explicit search/category/collection paths are treated as generic pages.
+  return /(?:[?&](?:q|query|search|keyword|text|filter|page|sort|order|_nkw)=)|\/(?:search|ricerca|search-results|results|listing|listings|catalog|category|categorie|inventory|vehicles|cars|auto|marketplace)(?:[/?#]|$)|\/marketplace(?:[/?#]|$)|\/p\/\d+(?:[/?#]|$)|\/gp\/search(?:[/?#]|$)|\/s\?(?:[^#]*&)??k=/i.test(u);
 }
 function looksLikeDirectListing(url){
   const u=String(url||'').toLowerCase();
