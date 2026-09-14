@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.18.0-PRO";
+const VERSION = "10.19.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -919,21 +919,21 @@ function hardRelevant(x,intent){
   const req=[...(intent.requiredPhrases||[]), ...(intent.vehicleModel?[intent.vehicleModel]:[])].map(clean).filter(Boolean).map(x=>x.toLowerCase());
   if(req.length && !req.some(r=>title.includes(r) || text.includes(r))) return false;
   if(kind==='car'||kind==='motorcycle'){
-    if(/(discovery\s+channel|channel|canale|televisione|documentario|documentary|streaming|serie\s+tv|episodio|programma tv)/i.test(text)) return false;
-    if(!/(auto|macchina|automobile|vehicle|car|moto|motorcycle|suv|km|chilometr|diesel|benzina|elettric|annuncio|vendita|usata|usato|concessionar)/i.test(text)) return false;
+    if(/\b(discovery\s+channel|channel|canale|televisione|documentario|documentary|streaming|serie\s+tv|episodio|programma tv)\b/i.test(text)) return false;
+    if(!/\b(auto|macchina|automobile|vehicle|car|moto|motorcycle|suv|km|chilometr|diesel|benzina|elettric|annuncio|vendita|usata|usato|concessionar)\b/i.test(text)) return false;
     if(intent.maxMileage!=null){const km=x.mileage!=null?Number(x.mileage):extractMileage(text); if(km==null||km>intent.maxMileage)return false;}
     if(intent.maxPrice!=null){const pp=x.price!=null?Number(x.price):priceOf(text,kind); if(pp==null||pp>intent.maxPrice)return false;}
     if(intent.minYear!=null){const yy=extractYear(text); if(yy!=null&&yy<intent.minYear)return false;}
   }
   if(kind==='realestate'){
-    if(!/(casa|appartamento|villa|immobile|immobiliare|monolocale|bilocale|trilocale|quadrilocale|mq|m²|affitto|vendita|rent|sale|property|house|apartment)/i.test(text)) return false;
+    if(!/\b(casa|appartamento|villa|immobile|immobiliare|monolocale|bilocale|trilocale|quadrilocale|mq|m²|affitto|vendita|rent|sale|property|house|apartment)\b/i.test(text)) return false;
     if(intent.maxPrice!=null){const pp=x.price!=null?Number(x.price):priceOf(text,kind); if(pp==null||pp>intent.maxPrice)return false;}
   }
   if(kind==='job'){
-    if(!/(lavoro|offerta|assunzione|posizione|impiego|career|job|recruit|stage|tirocinio|salary|stipendio)/i.test(text)) return false;
+    if(!/\b(lavoro|offerta|assunzione|posizione|impiego|career|job|recruit|stage|tirocinio|salary|stipendio)\b/i.test(text)) return false;
   }
   if(kind==='product'){
-    if(/(ristorante|hotel|volo|lavoro|immobile|affitto casa)/i.test(text)) return false;
+    if(/\b(ristorante|hotel|volo|lavoro|immobile|affitto casa)\b/i.test(text)) return false;
     const terms=(intent.coreTerms||[]).map(clean).filter(t=>t.length>=3);
     if(terms.length){const hits=terms.filter(t=>text.includes(t.toLowerCase())).length; if(hits<Math.max(1,Math.ceil(terms.length*.5))) return false;}
   }
@@ -996,8 +996,13 @@ async function searchSection(q, section, lat, lon, country="IT"){
   const ss=await Promise.allSettled(searches);
   let found=dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
   webResult.providerErrors=ss.flatMap(x=>x.status==='fulfilled'&&x.value?.providerError?[x.value.providerError]:[]).slice(0,5);
-  // Apply hard intent constraints BEFORE ranking, not after ranking.
-  found=found.filter(x=>hardRelevant(x,intent));
+  // Precision pipeline: enrich candidates BEFORE applying hard constraints.
+  // Search snippets often omit price/km/year; the listing page can contain them.
+  // Never discard a potentially valid listing just because its snippet is incomplete.
+  if(found.length){
+    found=await enrichResultMetadata(found, Math.min(found.length, 18));
+    found=found.filter(x=>hardRelevant(x,intent));
+  }
   // If strict filtering removes everything, do a second search using the exact
   // required phrase and category vocabulary, never the raw ambiguous query alone.
   if(!found.length){
@@ -1006,7 +1011,9 @@ async function searchSection(q, section, lat, lon, country="IT"){
       : `"${intent.requiredPhrases?.[0]||intent.coreTerms.join(' ')}" ${kind} ${intent.city||''}`;
     try{
       const rr=await exactWebSearch(rescueQ,intent,[]);
-      found=dedupe(rr.results||[]).filter(x=>hardRelevant(x,intent));
+      let rescueCandidates=dedupe(rr.results||[]);
+      rescueCandidates=await enrichResultMetadata(rescueCandidates, Math.min(rescueCandidates.length, 12));
+      found=rescueCandidates.filter(x=>hardRelevant(x,intent));
       if(rr.providerError) webResult.providerErrors.push(rr.providerError);
     }catch{}
   }
@@ -1019,20 +1026,13 @@ async function searchSection(q, section, lat, lon, country="IT"){
     try{ raw.push(...await flights(q)); }catch{}
   }
   let filtered=raw.filter(x=>kindEnforcement(x,intent));
-  // Vehicle searches with hard constraints must never show unknown/incorrect listings.
-  if ((kind==='car'||kind==='motorcycle') && intent.strictConstraints) {
-    filtered=filtered.filter(x=>{
-      const text=`${x.title||''} ${x.description||''}`;
-      if(intent.vehicleModel && !text.toLowerCase().includes(intent.vehicleModel.toLowerCase())) return false;
-      if(intent.maxMileage!=null){ const km=x.mileage!=null?Number(x.mileage):extractMileage(text); if(km==null||km>intent.maxMileage)return false; x.mileage=km; }
-      if(intent.maxPrice!=null){ const pp=x.price!=null?Number(x.price):priceOf(text,kind); if(pp==null||pp>intent.maxPrice)return false; x.price=pp; }
-      return true;
-    });
-  }
+  // Hard constraints are enforced by hardRelevant after page enrichment.
   const ranked=rank(dedupe(filtered),intent);
-  const enriched=await enrichResultMetadata(ranked, section==='shopping'?8:8);
-  await enrichDistances(enriched,lat,lon);
-  let finalResults=rank(enriched,intent);
+  const enriched=await enrichResultMetadata(ranked, section==='shopping'?12:10);
+  // Final gate: only enriched listings that still satisfy the user's exact intent survive.
+  let verified=enriched.filter(x=>hardRelevant(x,intent) && kindEnforcement(x,intent));
+  await enrichDistances(verified,lat,lon);
+  let finalResults=rank(verified,intent);
   if(!finalResults.length){
     try{ const rescue=await exactWebSearch(`"${q}" ${section==='shopping'?'prezzo acquisto annuncio prodotto':'Italia'}`,intent,[]); const rr=await enrichResultMetadata(rank(dedupe(rescue.results||[]),intent),section==='shopping'?4:4); await enrichDistances(rr,lat,lon); finalResults=rank(rr,intent); }catch{}
   }
