@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.20.0-PRO";
+const VERSION = "10.21.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -912,6 +912,37 @@ function searchVariants(q,intent,kind){
   if(original.toLowerCase()!==core.toLowerCase()) list.push(`"${original.replace(/\s+/g,' ').trim()}"${loc}${neg}`);
   return [...new Set(list.map(x=>x.replace(/\s+/g,' ').trim()))].slice(0,4);
 }
+
+function productIdentityTerms(intent){
+  const raw=[...(intent.coreTerms||[]),...(intent.requiredPhrases||[])].map(clean).filter(Boolean);
+  return [...new Set(raw.flatMap(t=>t.split(/\s+/).filter(x=>x.length>=2)))].filter(x=>!/^\d{1,2}$/.test(x));
+}
+function productExactRelevant(x,intent){
+  if(intent.kind!=='product') return true;
+  const title=clean(x.title).toLowerCase();
+  const text=`${title} ${clean(x.description)} ${clean(x.url)}`.toLowerCase();
+  const terms=productIdentityTerms(intent).map(t=>t.toLowerCase());
+  if(!terms.length) return true;
+  const hits=terms.filter(t=>title.includes(t)||text.includes(t));
+  // For a concrete product query, the title must carry the identity. A generic
+  // category page or accessory is not allowed to outrank the requested item.
+  const strong=terms.filter(t=>t.length>=3);
+  const strongHits=strong.filter(t=>title.includes(t));
+  if(strong.length>=2 && strongHits.length<Math.min(2,strong.length)) return false;
+  if(hits.length < Math.max(1,Math.ceil(terms.length*0.6))) return false;
+  if(/\b(accessorio|accessori|custodia|cover|pellicola|case|caricatore|charger|cavo|cable|ricambio|manuale|supporto|support|compatibile con)\b/i.test(title) && !/\b(accessorio|cover|custodia|case|cavo|charger)\b/i.test(intent.original||'')) return false;
+  return true;
+}
+function marketplaceLanes(kind,country='IT'){
+  if(kind==='product') return country==='IT'
+    ? ['amazon.it','ebay.it','subito.it','vinted.it','facebook.com','unieuro.it','mediaworld.it','eprice.it','trovaprezzi.it','idealo.it']
+    : ['amazon.com','ebay.com','facebook.com','vinted.com','etsy.com','walmart.com','bestbuy.com','target.com'];
+  if(kind==='car') return ['autoscout24.it','subito.it','facebook.com','automobile.it','autosupermarket.it','autouncle.it','ebay.it','kijiji.it'];
+  if(kind==='motorcycle') return ['subito.it','autoscout24.it','facebook.com','moto.it','automobile.it','ebay.it','kijiji.it'];
+  if(kind==='realestate') return ['immobiliare.it','idealista.it','casa.it','subito.it','facebook.com'];
+  if(kind==='job') return ['indeed.it','infojobs.it','linkedin.com','jooble.org','glassdoor.com'];
+  return [];
+}
 function hardRelevant(x,intent){
   const title=clean(x.title).toLowerCase();
   const text=`${title} ${clean(x.description)} ${clean(x.url)}`.toLowerCase();
@@ -934,8 +965,7 @@ function hardRelevant(x,intent){
   }
   if(kind==='product'){
     if(/\b(ristorante|hotel|volo|lavoro|immobile|affitto casa)\b/i.test(text)) return false;
-    const terms=(intent.coreTerms||[]).map(clean).filter(t=>t.length>=3);
-    if(terms.length){const hits=terms.filter(t=>text.includes(t.toLowerCase())).length; if(hits<Math.max(1,Math.ceil(terms.length*.5))) return false;}
+    if(!productExactRelevant(x,intent)) return false;
   }
   return true;
 }
@@ -980,24 +1010,33 @@ async function searchSection(q, section, lat, lon, country="IT"){
 
   const domains=marketDomainsFor(kind,country);
   const variants=searchVariants(q,intent,kind);
-  // SPEED + PRECISION: two targeted searches only. One searches the relevant
-  // marketplaces/shops, the other searches the whole web for stores whose
-  // listing host is not in our domain catalogue. More queries created a large
-  // fallback fan-out and made FINDO unnecessarily slow.
-  const targeted=variants[0]||q;
-  const alternate=variants[1]||targeted;
-  const searches=[
-    exactWebSearch(targeted,intent,domains.slice(0,80)),
-    exactWebSearch(alternate,intent,[])
-  ];
-  const ss=await Promise.allSettled(searches);
-  let found=dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
+
+  // PRECISION ENGINE: search the most important marketplaces in parallel lanes.
+  // Each lane is explicitly tied to the user's category, rather than asking a
+  // generic web index to decide what the product is.
+  const lanes=marketplaceLanes(kind,country);
+  const laneQueries=lanes.map((host)=>({host,query:variants[0]||q}));
+  const laneSettled=await Promise.allSettled(laneQueries.map(({host,query})=>
+    exactWebSearch(query,intent,[host])
+  ));
+  let found=dedupe(laneSettled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
+
+  // One cross-web pass is retained for stores not in the lane catalogue, but
+  // only when the marketplace lanes are insufficient. This keeps latency low.
+  if(found.length<6){
+    const broadQ=variants[0]||q;
+    try{
+      const wide=await exactWebSearch(broadQ,intent,[]);
+      found=dedupe([...found,...(wide.results||[])]);
+    }catch{}
+  }
 
   // Candidate enrichment is deliberately limited to the strongest candidates.
   // The page itself is the authority for price/km/year when snippets omit them.
   if(found.length){
-    found=rank(found.filter(x=>kindEnforcement(x,intent)),intent).slice(0,10);
-    found=await enrichResultMetadata(found, Math.min(found.length,8));
+    found=found.filter(x=>kindEnforcement(x,intent));
+    found=rank(found,intent).slice(0,18);
+    found=await enrichResultMetadata(found, Math.min(found.length,12));
     found=found.filter(x=>hardRelevant(x,intent) && kindEnforcement(x,intent));
   }
 
