@@ -319,14 +319,35 @@ function normalize(x) {
 // canonical metadata is safer than blindly opening the first indexed URL.
 function looksLikeSearchPage(url){
   const u=String(url||'').toLowerCase();
-  return /(?:[?&](?:q|query|search|keyword|text|filter|page|sort|order)=)|\/(?:search|ricerca|search-results|results|listing|listings|catalog|category|categorie|inventory|vehicles|cars|auto|offerte|annunci)(?:[/?#]|$)|\/marketplace(?:[/?#]|$)/i.test(u);
+  // Marketplace/product-collection pages are NOT individual offers. In
+  // particular eBay /p/ pages aggregate many sellers and must be treated as
+  // search pages unless they carry an individual /itm/ destination.
+  return /(?:[?&](?:q|query|search|keyword|text|filter|page|sort|order|_nkw)=)|\/(?:search|ricerca|search-results|results|listing|listings|catalog|category|categorie|inventory|vehicles|cars|auto|offerte|annunci|marketplace)(?:[/?#]|$)|\/marketplace(?:[/?#]|$)|\/p\/\d+(?:[/?#]|$)|\/gp\/search(?:[/?#]|$)|\/s\?(?:[^#]*&)??k=/i.test(u);
 }
 function looksLikeDirectListing(url){
   const u=String(url||'').toLowerCase();
   if(!/^https?:\/\//.test(u) || looksLikeSearchPage(u)) return false;
-  return /\/(?:annunci|offerte|offer|item|itm|product|products|dp|p|veicolo|vehicle|car|cars|moto|listing|ad|ads)(?:[\/-]|[?]|$)/i.test(u)
-    || /[a-f0-9]{8,}[-_][a-f0-9]{4,}/i.test(u)
-    || /(?:amazon\.[^/]+\/[^?#]*\/(?:dp|gp\/product)\/|ebay\.[^/]+\/itm\/|autoscout24\.[^/]+\/(?:annunci|offerte)\/|subito\.[^/]+\/annunci\/)/i.test(u);
+  // Known marketplaces: accept only their individual listing/product forms.
+  if(/(?:^|\.)subito\.[^/]+\/annunci\//i.test(u)) return true;
+  if(/(?:^|\.)vinted\.[^/]+\/items\//i.test(u)) return true;
+  if(/(?:^|\.)ebay\.[^/]+\/itm\//i.test(u)) return true;
+  if(/(?:^|\.)amazon\.[^/]+\/(?:[^?#]+\/)?(?:dp|gp\/product)\//i.test(u)) return true;
+  if(/(?:^|\.)facebook\.com\/marketplace\/item\//i.test(u)) return true;
+  if(/(?:^|\.)autoscout24\.[^/]+\/(?:annunci|offerte)\//i.test(u)) return true;
+  if(/(?:^|\.)automobile\.[^/]+\/(?:annunci|auto|offerte)\//i.test(u)) return true;
+  return /\/(?:annunci|offerte|offer|item|itm|product|products|dp|veicolo|vehicle|car|cars|moto|ad|ads)(?:[\/-]|[?]|$)/i.test(u)
+    || /[a-f0-9]{8,}[-_][a-f0-9]{4,}/i.test(u);
+}
+function marketplaceSpecificUrl(url, host){
+  const u=String(url||'').toLowerCase(); const h=String(host||hostOf(url)||'').toLowerCase();
+  if(!u || looksLikeSearchPage(u)) return false;
+  if(/(?:subito\.)/.test(h)) return /\/annunci\//.test(u);
+  if(/(?:vinted\.)/.test(h)) return /\/items\//.test(u);
+  if(/(?:ebay\.)/.test(h)) return /\/itm\//.test(u);
+  if(/(?:amazon\.)/.test(h)) return /\/(?:dp|gp\/product)\//.test(u);
+  if(/facebook\.com/.test(h)) return /\/marketplace\/item\//.test(u);
+  if(/autoscout24\./.test(h)) return /\/(?:annunci|offerte)\//.test(u);
+  return looksLikeDirectListing(u);
 }
 
 function decodeHtml(s){ return String(s||'').replace(/&amp;/g,'&').replace(/&quot;/g,'\"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>'); }
@@ -917,9 +938,44 @@ function productIdentityTerms(intent){
   const raw=[...(intent.coreTerms||[]),...(intent.requiredPhrases||[])].map(clean).filter(Boolean);
   return [...new Set(raw.flatMap(t=>t.split(/\s+/).filter(x=>x.length>=2)))].filter(x=>!/^\d{1,2}$/.test(x));
 }
+function normalizeProductText(s){
+  return String(s||'').toLowerCase()
+    .replace(/[®™]/g,'').replace(/\u00a0/g,' ')
+    .replace(/[–—]/g,'-').replace(/\s+/g,' ').trim();
+}
+function productExactProfile(intent){
+  const q=normalizeProductText(intent.original||'');
+  const p={requested:q, forbidden:[], exactPhrase:null};
+  // Explicit Apple iPhone generations: a request for the base model must not
+  // silently expand into Pro/Pro Max/Plus/e variants.
+  let m=q.match(/\biphone\s*(1[0-9])\b/i);
+  if(m && !/\b(?:pro\s*max|pro|plus|mini|e)\b/i.test(q)){
+    p.exactPhrase=`iphone ${m[1]}`;
+    p.forbidden=['pro max','pro','plus','mini','iphone '+m[1]+'e'];
+  }
+  m=q.match(/\bgalaxy\s+(s\d{1,2})\b/i);
+  if(m && !/\b(?:ultra|plus|fe|edge)\b/i.test(q)){
+    p.exactPhrase=`galaxy ${m[1]}`;
+    p.forbidden=['ultra','plus','fe','edge'];
+  }
+  m=q.match(/\bplaystation\s*5\b|\bps5\b/i);
+  if(m && !/\b(?:pro|slim)\b/i.test(q)) { p.exactPhrase='playstation 5'; p.forbidden=['pro','slim']; }
+  return p;
+}
+function productTitleMatchesExact(x,intent){
+  const title=normalizeProductText(x.title);
+  const profile=productExactProfile(intent);
+  if(profile.forbidden.some(v=>new RegExp(`\\b${v.replace(/[-/\\^$*+?.()|[\\]{}]/g,'\\\\$&')}\\b`,'i').test(title))) return false;
+  if(profile.exactPhrase){
+    const re=new RegExp(`\\b${profile.exactPhrase.split(/\\s+/).map(t=>t.replace(/[-/\\^$*+?.()|[\\]{}]/g,'\\\\$&')).join('\\s*')}\\b`,'i');
+    if(!re.test(title)) return false;
+  }
+  return true;
+}
 function productExactRelevant(x,intent){
   if(intent.kind!=='product') return true;
   const title=clean(x.title).toLowerCase();
+  if(!productTitleMatchesExact(x,intent)) return false;
   const text=`${title} ${clean(x.description)} ${clean(x.url)}`.toLowerCase();
   const terms=productIdentityTerms(intent).map(t=>t.toLowerCase());
   if(!terms.length) return true;
@@ -936,13 +992,29 @@ function productExactRelevant(x,intent){
 function marketplaceLanes(kind,country='IT'){
   if(kind==='product') return country==='IT'
     ? ['amazon.it','ebay.it','subito.it','vinted.it','facebook.com','unieuro.it','mediaworld.it','eprice.it','trovaprezzi.it','idealo.it']
-    : ['amazon.com','ebay.com','facebook.com','vinted.com','etsy.com','walmart.com','bestbuy.com','target.com'];
+    : ['amazon.com','ebay.com','facebook.com','vinted.com','walmart.com','bestbuy.com','target.com'];
   if(kind==='car') return ['autoscout24.it','subito.it','facebook.com','automobile.it','autosupermarket.it','autouncle.it','ebay.it','kijiji.it'];
   if(kind==='motorcycle') return ['subito.it','autoscout24.it','facebook.com','moto.it','automobile.it','ebay.it','kijiji.it'];
   if(kind==='realestate') return ['immobiliare.it','idealista.it','casa.it','subito.it','facebook.com'];
   if(kind==='job') return ['indeed.it','infojobs.it','linkedin.com','jooble.org','glassdoor.com'];
   return [];
 }
+function marketplaceQuery(host,intent,kind){
+  const core=kind==='product'
+    ? (productExactProfile(intent).exactPhrase || intent.coreTerms.join(' '))
+    : (intent.vehicleModel || intent.requiredPhrases?.[0] || intent.coreTerms.join(' '));
+  const constraints=[
+    intent.used?' usato':'',
+    intent.maxPrice!=null?` sotto ${intent.maxPrice} euro`:'',
+    intent.maxMileage!=null?` meno di ${intent.maxMileage} km`:'',
+    intent.minYear!=null?` dal ${intent.minYear}`:'',
+    intent.fuel?` ${intent.fuel}`:'',
+    intent.transmission?` ${intent.transmission}`:''
+  ].join('');
+  const transaction=kind==='product'?' acquisto prezzo':kind==='car'||kind==='motorcycle'?' vendita usato': ' offerta';
+  return `"${core}"${constraints}${intent.city?' '+intent.city:''}${transaction}`.replace(/\s+/g,' ').trim();
+}
+
 function hardRelevant(x,intent){
   const title=clean(x.title).toLowerCase();
   const text=`${title} ${clean(x.description)} ${clean(x.url)}`.toLowerCase();
@@ -1008,57 +1080,68 @@ async function searchSection(q, section, lat, lon, country="IT"){
   }
   intent.section=section; intent.country=country;
 
-  const domains=marketDomainsFor(kind,country);
-  const variants=searchVariants(q,intent,kind);
-
-  // PRECISION ENGINE: search the most important marketplaces in parallel lanes.
-  // Each lane is explicitly tied to the user's category, rather than asking a
-  // generic web index to decide what the product is.
+  // EXACT-MATCH ENGINE: the five highest-value marketplaces are searched first,
+  // in parallel. Secondary stores are queried only if the first pass is weak.
   const lanes=marketplaceLanes(kind,country);
-  const laneQueries=lanes.map((host)=>({host,query:variants[0]||q}));
-  const laneSettled=await Promise.allSettled(laneQueries.map(({host,query})=>
-    exactWebSearch(query,intent,[host])
-  ));
-  let found=dedupe(laneSettled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
+  const primary=lanes.slice(0,5);
+  const secondary=lanes.slice(5,10);
+  const q1=marketplaceQuery(primary[0]||'',intent,kind);
+  const runLanes=async hosts=>{
+    const settled=await Promise.allSettled(hosts.map(host=>exactWebSearch(marketplaceQuery(host,intent,kind),intent,[host])));
+    return dedupe(settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
+  };
 
-  // One cross-web pass is retained for stores not in the lane catalogue, but
-  // only when the marketplace lanes are insufficient. This keeps latency low.
-  if(found.length<6){
-    const broadQ=variants[0]||q;
-    try{
-      const wide=await exactWebSearch(broadQ,intent,[]);
-      found=dedupe([...found,...(wide.results||[])]);
-    }catch{}
+  let found=await runLanes(primary);
+  found=found.filter(x=>kindEnforcement(x,intent));
+  if(found.length<8 && secondary.length) {
+    found=dedupe([...found,...await runLanes(secondary)]).filter(x=>kindEnforcement(x,intent));
   }
 
-  // Candidate enrichment is deliberately limited to the strongest candidates.
-  // The page itself is the authority for price/km/year when snippets omit them.
+  // Only one broad pass, and only when marketplace coverage is insufficient.
+  if(found.length<8){
+    try {
+      const wide=await exactWebSearch(q1||q,intent,[]);
+      found=dedupe([...found,...(wide.results||[])]).filter(x=>kindEnforcement(x,intent));
+    } catch{}
+  }
+
+  // Verify the actual listing/product page before applying hard constraints.
+  // This avoids rejecting a valid listing merely because the search snippet
+  // omitted price, mileage, year, storage, etc.
   if(found.length){
-    found=found.filter(x=>kindEnforcement(x,intent));
-    found=rank(found,intent).slice(0,18);
-    found=await enrichResultMetadata(found, Math.min(found.length,12));
-    found=found.filter(x=>hardRelevant(x,intent) && kindEnforcement(x,intent));
+    found=rank(found,intent).slice(0,16);
+    found=await enrichResultMetadata(found,Math.min(found.length,10));
+    found=found.filter(x=>{
+      const h=hostOf(x.directUrl||x.url);
+      const primary=['amazon.','ebay.','subito.','vinted.','facebook.com','autoscout24.','automobile.'].some(v=>String(h).includes(v));
+      if(primary && !marketplaceSpecificUrl(x.directUrl||x.url,h)) return false;
+      return hardRelevant(x,intent)&&kindEnforcement(x,intent);
+    });
   }
 
-  // One precision rescue only when the targeted searches produced no verified
-  // result. Never launch a cascade of generic searches.
   if(!found.length){
-    const rescueQ=kind==='car'||kind==='motorcycle'
-      ? `"${intent.vehicleModel||intent.coreTerms.join(' ')}" auto usata vendita${intent.city?' '+intent.city:''} ${intent.maxMileage!=null?`meno di ${intent.maxMileage} km`:''} ${intent.maxPrice!=null?`sotto ${intent.maxPrice} euro`:''} -channel -tv -documentario`
-      : `"${intent.requiredPhrases?.[0]||intent.coreTerms.join(' ')}" ${kind} ${intent.city||''} acquisto prezzo`;
+    const exact=kind==='product'
+      ? `"${productExactProfile(intent).exactPhrase||intent.coreTerms.join(' ')}" ${intent.city||''} prezzo acquisto online`
+      : kind==='car'||kind==='motorcycle'
+        ? `"${intent.vehicleModel||intent.coreTerms.join(' ')}" vendita usato ${intent.city||''} ${intent.maxMileage!=null?`meno di ${intent.maxMileage} km`:''} ${intent.maxPrice!=null?`sotto ${intent.maxPrice} euro`:''} -channel -tv -documentario`
+        : `"${intent.requiredPhrases?.[0]||intent.coreTerms.join(' ')}" ${kind} ${intent.city||''}`;
     try{
-      const rr=await exactWebSearch(rescueQ,intent,domains.slice(0,80));
-      let candidates=rank(dedupe(rr.results||[]),intent).slice(0,6);
-      candidates=await enrichResultMetadata(candidates, candidates.length);
-      found=candidates.filter(x=>hardRelevant(x,intent) && kindEnforcement(x,intent));
+      const rr=await exactWebSearch(exact,intent,marketDomainsFor(kind,country).slice(0,60));
+      let candidates=rank(dedupe(rr.results||[]),intent).slice(0,8);
+      candidates=await enrichResultMetadata(candidates,candidates.length);
+      found=candidates.filter(x=>{
+        const h=hostOf(x.directUrl||x.url);
+        const primary=['amazon.','ebay.','subito.','vinted.','facebook.com','autoscout24.','automobile.'].some(v=>String(h).includes(v));
+        if(primary && !marketplaceSpecificUrl(x.directUrl||x.url,h)) return false;
+        return hardRelevant(x,intent)&&kindEnforcement(x,intent);
+      });
     }catch{}
   }
 
   let raw=[...found];
   if(section==='places' && lat!=null && lon!=null){ try{ raw.push(...await places(q,lat,lon,intent)); }catch{} }
   if(section==='travel' && detected==='flight'){ try{ raw.push(...await flights(q)); }catch{} }
-
-  let verified=dedupe(raw).filter(x=>kindEnforcement(x,intent) && hardRelevant(x,intent));
+  let verified=dedupe(raw).filter(x=>kindEnforcement(x,intent)&&hardRelevant(x,intent));
   await enrichDistances(verified,lat,lon);
   const finalResults=rank(verified,intent).slice(0,24);
   return {results:finalResults,kind,aiAnswer:null,intent};
