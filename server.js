@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "10.19.0-PRO";
+const VERSION = "10.20.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -966,77 +966,63 @@ async function searchSection(q, section, lat, lon, country="IT"){
   const spec=sectionSpec(section);
   if(!spec) return {results:[],kind:"general",aiAnswer:null};
   let kind=spec.kind;
-  // Preserve precise detected types inside a compatible section.
   const detected=detect(q);
   if(section==='shopping' && ['car','motorcycle','product'].includes(detected)) kind=detected;
   if(section==='travel' && ['hotel','flight'].includes(detected)) kind=detected;
   if(section==='places' && ['restaurant','hotel','pharmacy','gas'].includes(detected)) kind=detected;
+
   const intent=parseIntent(q,kind,lat,lon);
   if ((kind==='car'||kind==='motorcycle') && lat!=null && lon!=null) intent.near=true;
   if (lat!=null && lon!=null && !intent.city) {
-    const detectedCity=await reverseGeocodeCity(lat,lon);
-    if(detectedCity) intent.city=detectedCity;
+    try { const detectedCity=await reverseGeocodeCity(lat,lon); if(detectedCity) intent.city=detectedCity; } catch{}
   }
-  intent.section=section;
-  intent.country=country;
-  let webResult={results:[],aiAnswer:null,providerErrors:[]};
+  intent.section=section; intent.country=country;
+
   const domains=marketDomainsFor(kind,country);
   const variants=searchVariants(q,intent,kind);
-  const localDomains=domains.slice(0,32);
-  const globalDomains=domains.slice(32,80);
-  const searches=[];
-  for(const v of variants.slice(0,3)){
-    searches.push(exactWebSearch(v,intent,localDomains));
-  }
-  // Always perform one broad search without site restrictions. This is essential
-  // because marketplaces frequently expose the actual listing through a different
-  // host/subdomain than their main domain.
-  searches.push(exactWebSearch(variants[0]||q,intent,[]));
-  if(globalDomains.length) searches.push(exactWebSearch(variants[1]||q,intent,globalDomains));
+  // SPEED + PRECISION: two targeted searches only. One searches the relevant
+  // marketplaces/shops, the other searches the whole web for stores whose
+  // listing host is not in our domain catalogue. More queries created a large
+  // fallback fan-out and made FINDO unnecessarily slow.
+  const targeted=variants[0]||q;
+  const alternate=variants[1]||targeted;
+  const searches=[
+    exactWebSearch(targeted,intent,domains.slice(0,80)),
+    exactWebSearch(alternate,intent,[])
+  ];
   const ss=await Promise.allSettled(searches);
   let found=dedupe(ss.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
-  webResult.providerErrors=ss.flatMap(x=>x.status==='fulfilled'&&x.value?.providerError?[x.value.providerError]:[]).slice(0,5);
-  // Precision pipeline: enrich candidates BEFORE applying hard constraints.
-  // Search snippets often omit price/km/year; the listing page can contain them.
-  // Never discard a potentially valid listing just because its snippet is incomplete.
+
+  // Candidate enrichment is deliberately limited to the strongest candidates.
+  // The page itself is the authority for price/km/year when snippets omit them.
   if(found.length){
-    found=await enrichResultMetadata(found, Math.min(found.length, 18));
-    found=found.filter(x=>hardRelevant(x,intent));
+    found=rank(found.filter(x=>kindEnforcement(x,intent)),intent).slice(0,10);
+    found=await enrichResultMetadata(found, Math.min(found.length,8));
+    found=found.filter(x=>hardRelevant(x,intent) && kindEnforcement(x,intent));
   }
-  // If strict filtering removes everything, do a second search using the exact
-  // required phrase and category vocabulary, never the raw ambiguous query alone.
+
+  // One precision rescue only when the targeted searches produced no verified
+  // result. Never launch a cascade of generic searches.
   if(!found.length){
     const rescueQ=kind==='car'||kind==='motorcycle'
-      ? `"${intent.vehicleModel||intent.coreTerms.join(' ')}" auto usata vendita${intent.city?' '+intent.city:''} -channel -tv -documentario`
-      : `"${intent.requiredPhrases?.[0]||intent.coreTerms.join(' ')}" ${kind} ${intent.city||''}`;
+      ? `"${intent.vehicleModel||intent.coreTerms.join(' ')}" auto usata vendita${intent.city?' '+intent.city:''} ${intent.maxMileage!=null?`meno di ${intent.maxMileage} km`:''} ${intent.maxPrice!=null?`sotto ${intent.maxPrice} euro`:''} -channel -tv -documentario`
+      : `"${intent.requiredPhrases?.[0]||intent.coreTerms.join(' ')}" ${kind} ${intent.city||''} acquisto prezzo`;
     try{
-      const rr=await exactWebSearch(rescueQ,intent,[]);
-      let rescueCandidates=dedupe(rr.results||[]);
-      rescueCandidates=await enrichResultMetadata(rescueCandidates, Math.min(rescueCandidates.length, 12));
-      found=rescueCandidates.filter(x=>hardRelevant(x,intent));
-      if(rr.providerError) webResult.providerErrors.push(rr.providerError);
+      const rr=await exactWebSearch(rescueQ,intent,domains.slice(0,80));
+      let candidates=rank(dedupe(rr.results||[]),intent).slice(0,6);
+      candidates=await enrichResultMetadata(candidates, candidates.length);
+      found=candidates.filter(x=>hardRelevant(x,intent) && kindEnforcement(x,intent));
     }catch{}
   }
-  webResult.results=found;
-  let raw=[...(webResult.results||[])];
-  if(section==='places' && lat!=null && lon!=null){
-    try{ raw.push(...await places(q,lat,lon,intent)); }catch{}
-  }
-  if(section==='travel' && detected==='flight'){
-    try{ raw.push(...await flights(q)); }catch{}
-  }
-  let filtered=raw.filter(x=>kindEnforcement(x,intent));
-  // Hard constraints are enforced by hardRelevant after page enrichment.
-  const ranked=rank(dedupe(filtered),intent);
-  const enriched=await enrichResultMetadata(ranked, section==='shopping'?12:10);
-  // Final gate: only enriched listings that still satisfy the user's exact intent survive.
-  let verified=enriched.filter(x=>hardRelevant(x,intent) && kindEnforcement(x,intent));
+
+  let raw=[...found];
+  if(section==='places' && lat!=null && lon!=null){ try{ raw.push(...await places(q,lat,lon,intent)); }catch{} }
+  if(section==='travel' && detected==='flight'){ try{ raw.push(...await flights(q)); }catch{} }
+
+  let verified=dedupe(raw).filter(x=>kindEnforcement(x,intent) && hardRelevant(x,intent));
   await enrichDistances(verified,lat,lon);
-  let finalResults=rank(verified,intent);
-  if(!finalResults.length){
-    try{ const rescue=await exactWebSearch(`"${q}" ${section==='shopping'?'prezzo acquisto annuncio prodotto':'Italia'}`,intent,[]); const rr=await enrichResultMetadata(rank(dedupe(rescue.results||[]),intent),section==='shopping'?4:4); await enrichDistances(rr,lat,lon); finalResults=rank(rr,intent); }catch{}
-  }
-  return {results:finalResults,kind,aiAnswer:webResult.aiAnswer||null,intent};
+  const finalResults=rank(verified,intent).slice(0,24);
+  return {results:finalResults,kind,aiAnswer:null,intent};
 }
 
 /* ========== ROUTES ========== */
@@ -1383,7 +1369,7 @@ async function braveSearch(query,intent,domains=[]){
   const q=String(query||'').trim(); if(!q) return {results:[],providerError:'Query vuota'};
   const suffix=(domains||[]).slice(0,8).map(d=>`site:${String(d).replace(/^www\./,'').split('/')[0]}`).join(' ');
   const full=(q+' '+suffix).trim();
-  const a=await fetchHtmlSearch(`https://search.brave.com/search?q=${encodeURIComponent(full)}`,'Brave Search',intent,9000);
+  const a=await fetchHtmlSearch(`https://search.brave.com/search?q=${encodeURIComponent(full)}`,'Brave Search',intent,5500);
   return a;
 }
 
@@ -1391,15 +1377,15 @@ async function duckDuckGoSearch(query, intent, domains=[]){
   const q=String(query||'').trim(); if(!q) return {results:[],providerError:'Query vuota'};
   const suffix=(domains||[]).slice(0,8).map(d=>`site:${String(d).replace(/^www\./,'').split('/')[0]}`).join(' ');
   const full=(q+' '+suffix).trim();
-  const a=await fetchHtmlSearch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(full)}`,'DuckDuckGo',intent,9000);
+  const a=await fetchHtmlSearch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(full)}`,'DuckDuckGo',intent,5500);
   if(a.results.length) return a;
-  const b=await fetchHtmlSearch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(full)}`,'DuckDuckGo Lite',intent,9000);
+  const b=await fetchHtmlSearch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(full)}`,'DuckDuckGo Lite',intent,4000);
   if(b.results.length) return b;
   return {results:[],providerError:[a.providerError,b.providerError].filter(Boolean).join(' | ')||'Nessun risultato DuckDuckGo'};
 }
 
 async function fallbackWebSearch(query,intent,domains=[]){
-  const providers=[duckDuckGoSearch,bingRssSearch,braveSearch];
+  const providers=[bingRssSearch,braveSearch];
   const run=async(ds)=>{
     const settled=await Promise.allSettled(providers.map(fn=>fn(query,intent,ds)));
     const results=dedupe(settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
@@ -1418,7 +1404,7 @@ async function exactWebSearch(query, intent, domains=[]) {
   if(domains.length) body.include_domains=domains.slice(0,80);
   if(intent?.country) body.country=String(intent.country).toLowerCase();
   try{
-    const d=await tavilyFetch(body,15000,2); const out=[];
+    const d=await tavilyFetch(body,8000,1); const out=[];
     for(const x of (d.results||[])){const txt=`${x.title||''} ${x.content||''}`; out.push(normalize({title:compactDescription(x.title,110),description:compactDescription(x.content,260),url:x.url,source:hostOf(x.url),provider:'Tavily',kind:intent.kind||'product',price:priceOf(txt,intent.kind),rating:ratingOf(txt)}));}
     return {results:dedupe(out),answer:null,provider:'Tavily'};
   }catch(e){
