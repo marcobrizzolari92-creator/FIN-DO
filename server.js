@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "11.5.0-PRO-AUTONOMOUS";
+const VERSION = "11.6.0-PRO-AUTONOMOUS-RECOVERY";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -63,7 +63,8 @@ function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 function keyAvailable(name,key){ return (providerState[name]?.cooldowns?.[key]||0) <= Date.now(); }
 function rotateProvider(name,keys,badKey=null,retryAfterMs=1500){ const st=providerState[name]; if(!st)return; if(badKey)st.cooldowns[badKey]=Date.now()+Math.max(1200,retryAfterMs); if(keys.length>1){for(let n=1;n<=keys.length;n++){const next=(st.idx+n)%keys.length;if(keyAvailable(name,keys[next])){st.idx=next;break;}}} st.downUntil=Date.now()+Math.min(10000,Math.max(1200,retryAfterMs)); }
 function providerHealth(){ const tk=providerKeys(process.env.TAVILY_API_KEY,'TAVILY_API_KEYS'),gk=providerKeys(process.env.GEMINI_API_KEY||process.env.GOOGLE_GEMINI_API_KEY,'GEMINI_API_KEYS'); return {tavily:{configured:tk.length>0,keys:tk.length,downUntil:providerState.tavily.downUntil},gemini:{configured:gk.length>0,keys:gk.length,downUntil:providerState.gemini.downUntil}}; }
-async function tavilyFetch(body,timeoutMs=15000,retries=4,endpoint='/search'){ const keys=providerKeys(process.env.TAVILY_API_KEY,'TAVILY_API_KEYS'); if(!keys.length)throw new Error('TAVILY_API_KEY non configurata'); let last; for(let a=0;a<retries;a++){ let key=null; for(let n=0;n<keys.length;n++){const k=keys[(providerState.tavily.idx+n)%keys.length];if(keyAvailable('tavily',k)){key=k;providerState.tavily.idx=(providerState.tavily.idx+n)%keys.length;break;}} if(!key){await sleep(1200);continue;} const c=new AbortController(),t=setTimeout(()=>c.abort(),timeoutMs); try{const r=await fetch(`https://api.tavily.com${endpoint}`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${key}`},signal:c.signal,body:JSON.stringify(body)});const txt=await r.text();let d=null;try{d=JSON.parse(txt)}catch{} if(r.ok){providerState.tavily.cooldowns[key]=0;providerState.tavily.downUntil=0;return d||{};} const retryHeader=Number(r.headers.get('retry-after')||0),wait=retryHeader>0?Math.min(60000,retryHeader*1000):Math.min(10000,800*2**a+Math.random()*500);last=new Error(`Tavily ${r.status}: ${txt.slice(0,180)}`);if(r.status===432){break;} if([401,403].includes(r.status)){rotateProvider('tavily',keys,key,60000);break;} if([429,433,500,502,503,504].includes(r.status)){rotateProvider('tavily',keys,key,wait);await sleep(Math.min(wait,8000));} else break;}catch(e){last=e;rotateProvider('tavily',keys,key,1200);await sleep(Math.min(5000,700*2**a+Math.random()*500));}finally{clearTimeout(t)}} throw last||new Error('Tavily non disponibile'); }
+function tavilyUsable(){ return providerKeys(process.env.TAVILY_API_KEY,'TAVILY_API_KEYS').length>0 && providerState.tavily.downUntil<=Date.now(); }
+async function tavilyFetch(body,timeoutMs=15000,retries=4,endpoint='/search'){ const keys=providerKeys(process.env.TAVILY_API_KEY,'TAVILY_API_KEYS'); if(!keys.length)throw new Error('TAVILY_API_KEY non configurata'); let last; for(let a=0;a<retries;a++){ let key=null; for(let n=0;n<keys.length;n++){const k=keys[(providerState.tavily.idx+n)%keys.length];if(keyAvailable('tavily',k)){key=k;providerState.tavily.idx=(providerState.tavily.idx+n)%keys.length;break;}} if(!key){await sleep(1200);continue;} const c=new AbortController(),t=setTimeout(()=>c.abort(),timeoutMs); try{const r=await fetch(`https://api.tavily.com${endpoint}`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${key}`},signal:c.signal,body:JSON.stringify(body)});const txt=await r.text();let d=null;try{d=JSON.parse(txt)}catch{} if(r.ok){providerState.tavily.cooldowns[key]=0;providerState.tavily.downUntil=0;return d||{};} const retryHeader=Number(r.headers.get('retry-after')||0),wait=retryHeader>0?Math.min(60000,retryHeader*1000):Math.min(10000,800*2**a+Math.random()*500);last=new Error(`Tavily ${r.status}: ${txt.slice(0,180)}`);if(r.status===432){ providerState.tavily.downUntil=Date.now()+300000; providerState.tavily.cooldowns[key]=Date.now()+300000; break; } if([401,403].includes(r.status)){rotateProvider('tavily',keys,key,60000);break;} if([429,433,500,502,503,504].includes(r.status)){rotateProvider('tavily',keys,key,wait);await sleep(Math.min(wait,8000));} else break;}catch(e){last=e;rotateProvider('tavily',keys,key,1200);await sleep(Math.min(5000,700*2**a+Math.random()*500));}finally{clearTimeout(t)}} throw last||new Error('Tavily non disponibile'); }
 
 /* ========== CAR & MOTO MODELS ========== */
 const CAR_MODELS=/\b(discovery|range\s*rover|land\s*rover|defender|panda|punto|grande\s*punto|500|500e|c\s*hr|yaris|corolla|auris|rav\s*4|golf|passat|tiguan|touareg|polo|up!|focus|fiesta|mustang|kuga|civic|cr[- ]?v|hr[- ]?v|jazz|accord|clio|captur|megane|kadjar|scenic|twingo|corsa|mokka|astra|zafira|insignia|leon|ibiza|ateca|tarraco|arona|sportage|ceed|picanto|rio|i20|i30|tucson|santa\s*fe|sorento|juke|qashqai|x[- ]?trail|micra|pulsar|note|308|208|3008|5008|2008|c3|c4|c5|c3\s*aircross|duster|sandero|logan|s\s*cross|compass|renegade|wrangler|cherokee|grand\s*cherokee|124\s*spider|giulietta|stelvio|giulia|models?\s*[s3x]|model\s*y|cybertruck|leaf|ariya|gtr|clubman|countryman|cooper|swift|vitara|ignis|sx4|s[- ]?cross|space\s*star|colt|l200|pajero|outlander|asx|eclipse\s*cross|yaris\s*cross|aygo\s*x|land\s*cruiser|hilux|supra|gt86|prius|avensis|verso|ranger|explorer|ecosport|puma|mondeo|s[- ]?max|galaxy|c[- ]?max|transit|caddy|transporter|california|c\s*class|e\s*class|s\s*class|a\s*class|b\s*class|gla|glb|glc|gle|gls|cla|cle|clk|slc|slk|sl|amg|gt|eqs|eqe|eqa|eqb|eqc|id\s*\.?[34]|golf\s*gti|golf\s*r|r[- ]?s[2346]|tt|q[23578]|rs[345678]|m[23568]|x[1234567]|z[34]|i[34568]|ix|serie\s*[12345678]|m[23568]\s*serie|arkana|dacia|spring|arkana|t\s*cross|t\s*roc|taigo|nivus|virtus|vento|amarok|caddy|touareg|artega|porsche|cayenne|macan|taycan|panamera|boxster| cayman|maserati|levante|ghibli|quattroporte|mc20|lamborghini|urus|huracan|aventador|ferrari|roma|sf90|f8|296|purosangue|bentley|continental|flying\s*spur|bentayga|rolls\s*royce|ghost|phantom|cullinan|aston\s*martin|db[0-9]+|vantage|volvo|xc[0-9]+|s[0-9]+|v[0-9]+| Polestar)\b/i;
@@ -432,7 +433,7 @@ async function rescueDirectUrl(item){
   const host=hostOf(item.url||item.directUrl);
   const title=clean(item.title||'');
   if(!title || !host) return item;
-  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),7000);
+  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),3000);
   try{
     const detailHints=[item.price!=null?`€${item.price}`:'',item.mileage!=null?`${item.mileage} km`:''].filter(Boolean).join(' ');
     const q=`"${title.slice(0,180)}" ${detailHints} site:${host}`;
@@ -1100,18 +1101,27 @@ async function searchSection(q, section, lat, lon, country="IT"){
     return dedupe(settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
   };
 
-  let found=await runLanes(primary);
-  found=found.filter(x=>kindEnforcement(x,intent));
-  if(found.length<8 && secondary.length) {
-    found=dedupe([...found,...await runLanes(secondary)]).filter(x=>kindEnforcement(x,intent));
-  }
-
-  // Only one broad pass, and only when marketplace coverage is insufficient.
-  if(found.length<8){
+  let found=[];
+  if(tavilyUsable()) {
+    found=await runLanes(primary);
+    found=found.filter(x=>kindEnforcement(x,intent));
+    if(found.length<8 && secondary.length) {
+      found=dedupe([...found,...await runLanes(secondary)]).filter(x=>kindEnforcement(x,intent));
+    }
+    if(found.length<8){
+      try {
+        const wide=await exactWebSearch(q1||q,intent,[]);
+        found=dedupe([...found,...(wide.results||[])]).filter(x=>kindEnforcement(x,intent));
+      } catch{}
+    }
+  } else {
+    // Dead/missing Tavily: one resilient fallback pass. Direct marketplace
+    // adapters and public search engines run together, so the UI does not wait
+    // through a cascade of provider timeouts.
     try {
-      const wide=await exactWebSearch(q1||q,intent,[]);
-      found=dedupe([...found,...(wide.results||[])]).filter(x=>kindEnforcement(x,intent));
-    } catch{}
+      const fb=await fallbackWebSearch(marketplaceQuery(primary[0]||'',intent,kind),intent,[...primary,...secondary]);
+      found=dedupe(fb.results||[]).filter(x=>kindEnforcement(x,intent));
+    } catch {}
   }
 
   // Verify the actual listing/product page before applying hard constraints.
@@ -1128,7 +1138,17 @@ async function searchSection(q, section, lat, lon, country="IT"){
     });
   }
 
-  if(!found.length){
+  if(!found.length && tavilyUsable()){
+    // Provider-independent recovery: fetch the marketplace search pages directly.
+    // This is intentionally before the final strict rescue so a dead API cannot
+    // make the application appear empty.
+    try {
+      const direct=await directMarketplaceRecovery(marketplaceQuery(primary[0]||'',intent,kind),intent,primary);
+      found=direct.results.filter(x=>kindEnforcement(x,intent));
+    } catch {}
+  }
+
+  if(!found.length && tavilyUsable()){
     const exact=kind==='product'
       ? `"${productExactProfile(intent).exactPhrase||intent.coreTerms.join(' ')}" ${intent.city||''} prezzo acquisto online`
       : kind==='car'||kind==='motorcycle'
@@ -1191,7 +1211,8 @@ app.get("/api/diagnostics", async (req, res) => {
     try { const d=await tavilyFetch({query:"test",search_depth:"basic",max_results:1,include_answer:false,include_raw_content:false,topic:"general"},8000,1); out.tavilyLive={ok:true,results:Array.isArray(d.results)?d.results.length:0}; }
     catch(e){ out.tavilyLive={ok:false,error:String(e?.message||e).replace(/tvly-[^\s]+/gi,"[redacted]").slice(0,220)}; }
   }
-  try { const d=await fallbackWebSearch('iPhone 16 Pro',{kind:'product',coreTerms:['iPhone 16 Pro'],terms:['iPhone 16 Pro']},[]); out.webFallbackLive={ok:(d.results||[]).length>0,provider:d.provider||d.providerFallback||null,results:(d.results||[]).length,error:d.providerError||null}; } catch(e){ out.webFallbackLive={ok:false,error:String(e?.message||e).slice(0,220)}; }
+  try { const d=await fallbackWebSearch('iPhone 16 Pro',{kind:'product',coreTerms:['iPhone 16 Pro'],terms:['iPhone 16 Pro'],original:'iPhone 16 Pro',country:'IT'},[]); out.webFallbackLive={ok:(d.results||[]).length>0,provider:d.provider||d.providerFallback||null,results:(d.results||[]).length,error:d.providerError||null}; } catch(e){ out.webFallbackLive={ok:false,error:String(e?.message||e).slice(0,220)}; }
+  try { const d=await directMarketplaceRecovery('"iPhone 16" prezzo', {kind:'product',coreTerms:['iPhone','16'],terms:['iPhone','16'],original:'iPhone 16',country:'IT'}, ['subito.it','ebay.it','amazon.it','vinted.it']); out.directMarketplaceLive={ok:(d.results||[]).length>0,results:(d.results||[]).length,error:d.providerError||null}; } catch(e){ out.directMarketplaceLive={ok:false,error:String(e?.message||e).slice(0,220)}; }
   if(gk.length){
     try { const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent((process.env.GEMINI_MODEL||"gemini-3.6-flash").trim())+":generateContent?key="+encodeURIComponent(gk[0]),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{parts:[{text:"Reply only OK"}]}]})}); const txt=await r.text(); out.geminiLive={ok:r.ok,status:r.status}; if(!r.ok) out.geminiLive.error=txt.slice(0,220).replace(/AIza[0-9A-Za-z_-]+|AQ\.[^\s\"]+/g,"[redacted]"); }
     catch(e){ out.geminiLive={ok:false,error:String(e?.message||e).slice(0,220)}; }
@@ -1480,7 +1501,7 @@ async function bingRssSearch(query,intent,domains=[]){
   const q=String(query||'').trim(); if(!q) return {results:[],providerError:'Query vuota'};
   const suffix=(domains||[]).slice(0,8).map(d=>`site:${String(d).replace(/^www\./,'').split('/')[0]}`).join(' ');
   const full=(q+' '+suffix).trim();
-  const c=new AbortController(),t=setTimeout(()=>c.abort(),9000);
+  const c=new AbortController(),t=setTimeout(()=>c.abort(),3000);
   try{
     const u=`https://www.bing.com/search?format=rss&q=${encodeURIComponent(full)}`;
     const r=await fetch(u,{headers:{'User-Agent':'Mozilla/5.0','Accept':'application/rss+xml,application/xml,text/xml,*/*;q=0.8'},signal:c.signal});
@@ -1500,7 +1521,7 @@ async function braveSearch(query,intent,domains=[]){
   const q=String(query||'').trim(); if(!q) return {results:[],providerError:'Query vuota'};
   const suffix=(domains||[]).slice(0,8).map(d=>`site:${String(d).replace(/^www\./,'').split('/')[0]}`).join(' ');
   const full=(q+' '+suffix).trim();
-  const a=await fetchHtmlSearch(`https://search.brave.com/search?q=${encodeURIComponent(full)}`,'Brave Search',intent,5500);
+  const a=await fetchHtmlSearch(`https://search.brave.com/search?q=${encodeURIComponent(full)}`,'Brave Search',intent,3000);
   return a;
 }
 
@@ -1508,25 +1529,101 @@ async function duckDuckGoSearch(query, intent, domains=[]){
   const q=String(query||'').trim(); if(!q) return {results:[],providerError:'Query vuota'};
   const suffix=(domains||[]).slice(0,8).map(d=>`site:${String(d).replace(/^www\./,'').split('/')[0]}`).join(' ');
   const full=(q+' '+suffix).trim();
-  const a=await fetchHtmlSearch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(full)}`,'DuckDuckGo',intent,5500);
+  const a=await fetchHtmlSearch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(full)}`,'DuckDuckGo',intent,3000);
   if(a.results.length) return a;
-  const b=await fetchHtmlSearch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(full)}`,'DuckDuckGo Lite',intent,4000);
+  const b=await fetchHtmlSearch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(full)}`,'DuckDuckGo Lite',intent,2500);
   if(b.results.length) return b;
   return {results:[],providerError:[a.providerError,b.providerError].filter(Boolean).join(' | ')||'Nessun risultato DuckDuckGo'};
 }
 
-async function fallbackWebSearch(query,intent,domains=[]){
-  const providers=[bingRssSearch,braveSearch];
-  const run=async(ds)=>{
-    const settled=await Promise.allSettled(providers.map(fn=>fn(query,intent,ds)));
-    const results=dedupe(settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
-    const errors=settled.flatMap(x=>x.status==='fulfilled'?(x.value?.providerError? [x.value.providerError]:[]):['provider error']).filter(Boolean);
-    return {results,provider:results.length?'multi-fallback':null,providerError:errors.slice(0,4).join(' | ')};
+
+function marketplaceSearchUrl(host, query){
+  const h=String(host||'').toLowerCase().replace(/^www\./,'').split('/')[0];
+  const q=encodeURIComponent(String(query||'').replace(/site:[^ ]+/gi,'').trim());
+  if(h.startsWith('amazon.')) return `https://${h}/s?k=${q}`;
+  if(h.startsWith('ebay.')) return `https://${h}/sch/i.html?_nkw=${q}`;
+  if(h==='subito.it') return `https://www.subito.it/annunci-italia/vendita/usato/?q=${q}`;
+  if(h==='vinted.it') return `https://www.vinted.it/catalog?search_text=${q}`;
+  if(h==='vinted.com') return `https://www.vinted.com/catalog?search_text=${q}`;
+  if(h==='autoscout24.it') return `https://www.autoscout24.it/lst?sort=standard&desc=0&ustate=N%2CU&atype=C&cy=I&search_id=${q}`;
+  if(h==='automobile.it') return `https://www.automobile.it/usato?query=${q}`;
+  if(h==='moto.it') return `https://www.moto.it/moto-usate/?q=${q}`;
+  if(h==='immobiliare.it') return `https://www.immobiliare.it/vendita-case/?criterio=rilevanza&query=${q}`;
+  if(h==='idealista.it') return `https://www.idealista.it/ricerca/vendita-case?ordine=pubblicazione-desc&q=${q}`;
+  return null;
+}
+
+function extractMarketplaceLinks(html, host, intent){
+  const h=String(host||'').toLowerCase().replace(/^www\./,'').split('/')[0];
+  const links=[]; const seen=new Set();
+  const re=/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  const abs=(href)=>{try{return new URL(decodeHtml(href),`https://${h}/`).href}catch{return null}};
+  const valid=(u)=>{
+    if(!u || looksLikeSearchPage(u)) return false;
+    const x=u.toLowerCase();
+    if(h.startsWith('amazon.')) return /\/dp\//.test(x)||/\/gp\/product\//.test(x);
+    if(h.startsWith('ebay.')) return /\/itm\//.test(x);
+    if(h==='subito.it') return /subito\.it\/[^?#]*\/annunci\//.test(x);
+    if(h.startsWith('vinted.')) return /vinted\.[^/]+\/items\//.test(x);
+    if(h==='facebook.com') return /facebook\.com\/marketplace\/item\//.test(x);
+    if(h.startsWith('autoscout24.')) return /autoscout24\.[^/]+\/(?:annunci|offerte)\//.test(x);
+    if(h==='automobile.it') return /automobile\.it\/(?:annunci|auto|offerte)\//.test(x);
+    if(h==='moto.it') return /moto\.it\/[^?#]*\/\d{5,}/.test(x)||/moto\.it\/moto-usate\/[^?#]+/i.test(x);
+    if(h==='immobiliare.it') return /immobiliare\.it\/annunci\//.test(x);
+    if(h==='idealista.it') return /idealista\.it\/immobile\//.test(x);
+    return looksLikeDirectListing(x);
   };
-  let r=await run(domains);
-  if(r.results?.length || !domains?.length) return r;
-  const wide=await run([]);
-  return wide.results?.length ? wide : {results:[],providerError:[r.providerError,wide.providerError].filter(Boolean).join(' | ')};
+  while((m=re.exec(html)) && links.length<40){
+    const u=abs(m[1]); if(!valid(u)) continue;
+    if(seen.has(u)) continue;
+    const text=compactDescription(decodeHtml(String(m[2]||'').replace(/<[^>]+>/g,' ')),180);
+    if(!text) continue;
+    seen.add(u);
+    const block=`${text} ${html.slice(Math.max(0,m.index-200),Math.min(html.length,m.index+1400))}`;
+    links.push(normalize({title:text,description:compactDescription(block,300),url:u,directUrl:u,source:h,provider:'Direct Marketplace',kind:intent?.kind||'product',price:priceOf(block,intent?.kind),rating:ratingOf(block)}));
+  }
+  return dedupe(links);
+}
+
+async function directMarketplaceSearch(host, query, intent){
+  const u=marketplaceSearchUrl(host,query); if(!u) return {results:[],providerError:`Nessun adapter per ${host}`};
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),7000);
+  try{
+    const r=await fetch(u,{redirect:'follow',headers:{'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153 Safari/537.36','Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8','Accept-Language':'it-IT,it;q=0.9,en;q=0.8'},signal:controller.signal});
+    if(!r.ok) throw new Error(`${host} ${r.status}`);
+    const html=await r.text();
+    return {results:extractMarketplaceLinks(html,host,intent),provider:'Direct Marketplace'};
+  }catch(e){ return {results:[],providerError:String(e?.message||e).slice(0,180)}; }
+  finally{clearTimeout(timer)}
+}
+
+async function directMarketplaceRecovery(query,intent,hosts=[]){
+  const list=[...(hosts.length?hosts:marketplaceLanes(intent.kind,intent.country||'IT'))].slice(0,4);
+  const settled=await Promise.allSettled(list.map(h=>directMarketplaceSearch(h,query,intent)));
+  const results=dedupe(settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
+  const errors=settled.flatMap(x=>x.status==='fulfilled'?(x.value?.providerError?[x.value.providerError]:[]):['provider error']).filter(Boolean);
+  return {results,provider:results.length?'direct-marketplace':null,providerError:errors.slice(0,5).join(' | ')};
+}
+
+async function fallbackWebSearch(query,intent,domains=[]){
+  const providers=[bingRssSearch,braveSearch,duckDuckGoSearch];
+  const run=async(ds)=>{
+    const directPromise=directMarketplaceRecovery(query,intent,ds);
+    const webPromise=Promise.allSettled(providers.map(fn=>fn(query,intent,ds)));
+    const [direct,settled]=await Promise.all([directPromise,webPromise]);
+    const results=dedupe([
+      ...(direct.results||[]),
+      ...settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[])
+    ]);
+    const errors=[direct.providerError,...settled.flatMap(x=>x.status==='fulfilled'?(x.value?.providerError?[x.value.providerError]:[]):['provider error'])].filter(Boolean);
+    return {results,provider:results.length?'multi-fallback':null,providerError:errors.slice(0,5).join(' | ')};
+  };
+  const r=await run(domains);
+  // Do not launch a second broad pass here: the direct marketplace adapters
+  // already ran in parallel. A second web-engine wave only adds latency and was
+  // one of the causes of the previous 'no result' feeling.
+  return r;
 }
 
 async function exactWebSearch(query, intent, domains=[]) {
@@ -1541,7 +1638,9 @@ async function exactWebSearch(query, intent, domains=[]) {
   }catch(e){
     const tvErr=String(e?.message||'Tavily non disponibile').replace(/tvly-[^\s]+/gi,'[redacted]');
     const fb=await fallbackWebSearch(query,intent,domains);
-    return fb.results?.length ? {...fb,providerFallback:'Tavily',tavilyError:tvErr} : {results:[],answer:null,providerError:tvErr+(fb.providerError?` | fallback: ${fb.providerError}`:'')};
+    if(fb.results?.length) return {...fb,providerFallback:'Tavily',tavilyError:tvErr};
+    const direct=await directMarketplaceRecovery(query,intent,domains);
+    return direct.results?.length ? {...direct,providerFallback:'Tavily',tavilyError:tvErr} : {results:[],answer:null,providerError:tvErr+(fb.providerError?` | fallback: ${fb.providerError}`:'')+(direct.providerError?` | direct: ${direct.providerError}`:'')};
   }
 }
 
