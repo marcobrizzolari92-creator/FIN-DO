@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "11.4.0-PRO";
+const VERSION = "11.5.0-PRO-AUTONOMOUS";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -238,7 +238,7 @@ function kindEnforcement(x, intent) {
   }
   if (kind==='restaurant') { if (/\b(auto|macchina|motor[io]|veicolo|moto|usata|usato|km\s*0|diesel|benzina|cilindrata|concessionar|prenota\s+volo|voli|flight|hotel\s+room|noleggio|leasing|smartphone|iphone|tv|laptop)\b/i.test(text)) return false; }
   if (kind==='hotel') { if (/\b(auto|macchina|motor[io]|veicolo|moto|usata|usato|km\s*0|diesel|benzina|cilindrata|concessionar|voli|flight|noleggio|leasing|ristorante\s+recensione|smartphone|iphone|tv)\b/i.test(text)) return false; }
-  if (kind==='product') { if (/\b(ristorante|pizzeria|hotel|albergo|volo|voli|diesel|benzina|cilindrata|farmacia|distributore|noleggio|leasing|affitt|camera|cena|mangiare)\b/i.test(text)) return false; }
+  if (kind==='product') { if (/\b(ristorante|pizzeria|hotel|albergo|volo|voli|usata|usato|diesel|benzina|cilindrata|farmacia|distributore|noleggio|leasing|affitt|camera|cena|mangiare)\b/i.test(text)) return false; }
   if (kind==='flight') { if (/\b(ristorante|pizzeria|hotel|albergo|auto|macchina|motor[io]|farmacia|distributore|smartphone|iphone|tv|noleggio|leasing)\b/i.test(text)) return false; }
   if (kind==='job') { if (/\b(auto\s+usata|macchina|motor[io]|volo|hotel|ristorante|pizzeria|farmacia|distributore|noleggio|leasing|compra|vendita\s+auto)\b/i.test(text)) return false; }
   if (kind==='realestate') { if (/\b(auto|macchina|motor[io]|volo|ristorante|pizzeria|farmacia|distributore|smartphone|iphone|tv|noleggio|leasing|auto\s+usata)\b/i.test(text)) return false; }
@@ -319,18 +319,24 @@ function normalize(x) {
 // canonical metadata is safer than blindly opening the first indexed URL.
 function looksLikeSearchPage(url){
   const u=String(url||'').toLowerCase();
-  if(!/^https?:\/\//.test(u)) return true;
-  if(/(?:[?&](?:q|query|search|keyword|text|filter|page|sort|order|_nkw)=)/i.test(u)) return true;
-  if(/\/(?:search|ricerca|search-results|results|catalog|category|categorie|inventory|vehicles|cars)(?:[\/?#]|$)/i.test(u)) return true;
-  if(/\/marketplace(?:[\/?#]|$)/i.test(u) && !/\/marketplace\/item\//i.test(u)) return true;
-  if(/\/p\/\d+(?:[\/?#]|$)/i.test(u)) return true;
-  if(/\/gp\/search(?:[\/?#]|$)/i.test(u)) return true;
-  if(/\/s\?(?:[^#]*&)??k=/i.test(u)) return true;
-  return false;
+  if(!u) return true;
+  // IMPORTANT: individual marketplace listings can live under paths that also
+  // occur in search pages (e.g. Subito /annunci/ and AutoScout24 /offerte/).
+  // Check the known direct-listing forms FIRST, otherwise a broad search-page
+  // regex would reject every valid listing before verification.
+  if(/(?:^|\.)subito\.[^/]+\/annunci\//i.test(u)) return false;
+  if(/(?:^|\.)vinted\.[^/]+\/items\//i.test(u)) return false;
+  if(/(?:^|\.)ebay\.[^/]+\/itm\//i.test(u)) return false;
+  if(/(?:^|\.)amazon\.[^/]+\/(?:[^?#]+\/)?(?:dp|gp\/product)\//i.test(u)) return false;
+  if(/(?:^|\.)facebook\.com\/marketplace\/item\//i.test(u)) return false;
+  if(/(?:^|\.)autoscout24\.[^/]+\/(?:annunci|offerte)\//i.test(u)) return false;
+  if(/(?:^|\.)automobile\.[^/]+\/(?:annunci|auto|offerte)\//i.test(u)) return false;
+  return /(?:[?&](?:q|query|search|keyword|text|filter|page|sort|order|_nkw)=)|\/(?:search|ricerca|search-results|results|listing|listings|catalog|category|categorie|inventory|vehicles|cars|auto|offerte|annunci|marketplace)(?:[/?#]|$)|\/marketplace(?:[/?#]|$)|\/p\/\d+(?:[/?#]|$)|\/gp\/search(?:[/?#]|$)|\/s\?(?:[^#]*&)??k=/i.test(u);
 }
 function looksLikeDirectListing(url){
   const u=String(url||'').toLowerCase();
-  if(!/^https?:\/\//.test(u)) return false;
+  if(!/^https?:\/\//.test(u) || looksLikeSearchPage(u)) return false;
+  // Known marketplaces: accept only their individual listing/product forms.
   if(/(?:^|\.)subito\.[^/]+\/annunci\//i.test(u)) return true;
   if(/(?:^|\.)vinted\.[^/]+\/items\//i.test(u)) return true;
   if(/(?:^|\.)ebay\.[^/]+\/itm\//i.test(u)) return true;
@@ -338,20 +344,18 @@ function looksLikeDirectListing(url){
   if(/(?:^|\.)facebook\.com\/marketplace\/item\//i.test(u)) return true;
   if(/(?:^|\.)autoscout24\.[^/]+\/(?:annunci|offerte)\//i.test(u)) return true;
   if(/(?:^|\.)automobile\.[^/]+\/(?:annunci|auto|offerte)\//i.test(u)) return true;
-  if(looksLikeSearchPage(u)) return false;
-  return /\/(?:offer|item|itm|product|products|dp|veicolo|vehicle|car|moto|ad|ads)(?:[\/-]|[?]|$)/i.test(u)
+  return /\/(?:annunci|offerte|offer|item|itm|product|products|dp|veicolo|vehicle|car|cars|moto|ad|ads)(?:[\/-]|[?]|$)/i.test(u)
     || /[a-f0-9]{8,}[-_][a-f0-9]{4,}/i.test(u);
 }
 function marketplaceSpecificUrl(url, host){
   const u=String(url||'').toLowerCase(); const h=String(host||hostOf(url)||'').toLowerCase();
-  if(!u || !/^https?:\/\//.test(u)) return false;
-  if(/subito\./.test(h)) return /\/annunci\//.test(u);
-  if(/vinted\./.test(h)) return /\/items\//.test(u);
-  if(/ebay\./.test(h)) return /\/itm\//.test(u);
-  if(/amazon\./.test(h)) return /\/(?:dp|gp\/product)\//.test(u);
+  if(!u || looksLikeSearchPage(u)) return false;
+  if(/(?:subito\.)/.test(h)) return /\/annunci\//.test(u);
+  if(/(?:vinted\.)/.test(h)) return /\/items\//.test(u);
+  if(/(?:ebay\.)/.test(h)) return /\/itm\//.test(u);
+  if(/(?:amazon\.)/.test(h)) return /\/(?:dp|gp\/product)\//.test(u);
   if(/facebook\.com/.test(h)) return /\/marketplace\/item\//.test(u);
   if(/autoscout24\./.test(h)) return /\/(?:annunci|offerte)\//.test(u);
-  if(/automobile\./.test(h)) return /\/(?:annunci|auto|offerte)\//.test(u);
   return looksLikeDirectListing(u);
 }
 
@@ -1091,14 +1095,9 @@ async function searchSection(q, section, lat, lon, country="IT"){
   const primary=lanes.slice(0,5);
   const secondary=lanes.slice(5,10);
   const q1=marketplaceQuery(primary[0]||'',intent,kind);
-  // One provider request per lane, not one request per marketplace. This is
-  // substantially faster and avoids exhausting Tavily/fallback providers.
   const runLanes=async hosts=>{
-    if(!hosts.length) return [];
-    const domains=[...new Set(hosts.map(h=>String(h).split('/')[0].replace(/^www\./,'')).filter(Boolean))];
-    const query=marketplaceQuery(hosts[0],intent,kind);
-    const r=await exactWebSearch(query,intent,domains);
-    return dedupe(r.results||[]);
+    const settled=await Promise.allSettled(hosts.map(host=>exactWebSearch(marketplaceQuery(host,intent,kind),intent,[host])));
+    return dedupe(settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
   };
 
   let found=await runLanes(primary);
@@ -1203,7 +1202,7 @@ app.get("/api/diagnostics", async (req, res) => {
 app.get("/api/health", async (req, res) => res.json({
   ok: true, version: VERSION,
   geminiModels: (process.env.GEMINI_MODELS||process.env.GEMINI_MODEL||"gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash").split(",").map(clean).filter(Boolean),
-  providers: {web:providerHealth().tavily.configured,places:!!process.env.GOOGLE_MAPS_API_KEY,flights:!!(process.env.AMADEUS_CLIENT_ID&&process.env.AMADEUS_CLIENT_SECRET),gemini:providerHealth().gemini.configured}, providerHealth:providerHealth()
+  providers: {web:providerHealth().tavily.configured,places:!!process.env.GOOGLE_MAPS_API_KEY,flights:!!(process.env.AMADEUS_CLIENT_ID&&process.env.AMADEUS_CLIENT_SECRET),gemini:providerHealth().gemini.configured,webFallback:true}, providerHealth:{...providerHealth(),fallbackWeb:true}
 }));
 
 app.get("/api/search", async (req, res) => {
@@ -1445,14 +1444,6 @@ async function parseHtmlSearchResults(html, engine, intent){
   const push=(href,title,desc='')=>{
     try{ href=decodeURIComponent(String(href||'').replace(/&amp;/g,'&')); }catch{}
     if(href.startsWith('//')) href='https:'+href;
-    // Search engines often wrap the real destination in a redirect URL.
-    // Unwrap it before URL validation so fallback providers can still return
-    // individual marketplace listings.
-    try {
-      const hu=new URL(href, 'https://search.example');
-      const wrapped=hu.searchParams.get('uddg') || hu.searchParams.get('url') || hu.searchParams.get('u');
-      if(wrapped && /^https?:\/\//i.test(wrapped)) href=decodeURIComponent(wrapped);
-    } catch {}
     if(!/^https?:\/\//i.test(href)) return;
     if(/^(https?:\/\/)?(www\.)?(google|bing|duckduckgo|search\.brave)\./i.test(href)) return;
     const cleanTitle=clean(String(title||'').replace(/<[^>]+>/g,' '));
@@ -1462,7 +1453,7 @@ async function parseHtmlSearchResults(html, engine, intent){
   };
   let m;
   // DDG HTML: capture the whole anchor regardless of attribute order.
-  const anchors=/<a\b[^>]*class=["'][^"']*(?:result__a|result-link|result-header|result-title|snippet-title)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const anchors=/<a\b[^>]*class=["'][^"']*(?:result__a|result-link)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
   while((m=anchors.exec(html)) && results.length<15){
     const block=m[0]; const hm=block.match(/href=["']([^"']+)["']/i); if(!hm) continue;
     const tail=html.slice(m.index+m[0].length,m.index+m[0].length+1800); push(hm[1],m[1],tail);
@@ -1496,7 +1487,7 @@ async function bingRssSearch(query,intent,domains=[]){
     const xml=await r.text(); if(!r.ok) throw new Error(`Bing RSS ${r.status}`);
     const out=[]; const re=/<item>([\s\S]*?)<\/item>/gi; let m;
     while((m=re.exec(xml))&&out.length<15){
-      const block=m[1]; const get=(tag)=>{const x=block.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`,'i')); return x?x[1].replace(/<!\[CDATA\[|\]\]>/g,'').trim():''};
+      const block=m[1]; const get=(tag)=>{const x=block.match(new RegExp(`<${tag}>([\\s\\S]*?)<\/${tag}>`,'i')); return x?x[1].replace(/<!\[CDATA\[|\]\]>/g,'').trim():''};
       const title=get('title'), link=get('link'), desc=get('description');
       if(title&&/^https?:\/\//i.test(link)) out.push(normalize({title:compactDescription(title,110),description:compactDescription(desc,260),url:link,source:hostOf(link),provider:'Bing RSS',kind:intent?.kind||'product',price:priceOf(`${title} ${desc}`,intent?.kind),rating:ratingOf(`${title} ${desc}`)}));
     }
@@ -1525,7 +1516,7 @@ async function duckDuckGoSearch(query, intent, domains=[]){
 }
 
 async function fallbackWebSearch(query,intent,domains=[]){
-  const providers=[bingRssSearch,braveSearch,duckDuckGoSearch];
+  const providers=[bingRssSearch,braveSearch];
   const run=async(ds)=>{
     const settled=await Promise.allSettled(providers.map(fn=>fn(query,intent,ds)));
     const results=dedupe(settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));

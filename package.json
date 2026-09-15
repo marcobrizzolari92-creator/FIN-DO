@@ -1,7 +1,7 @@
 {
   "name": "findo",
-  "version": "11.4.0",
-  "description": "FINDO — Cerca, confronta e trova qualsiasi cosa",
+  "version": "11.5.0",
+  "description": "FINDO \u2014 Cerca, confronta e trova qualsiasi cosa",
   "type": "module",
   "main": "server.js",
   "scripts": {
