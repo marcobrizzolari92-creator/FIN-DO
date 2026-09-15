@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 120) * 1000;
 const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE || 60);
-const VERSION = "11.3.0-PRO";
+const VERSION = "11.4.0-PRO";
 
 app.use(express.json({limit:"16mb"}));
 app.use(express.raw({type:"application/octet-stream",limit:"5mb"}));
@@ -1091,9 +1091,14 @@ async function searchSection(q, section, lat, lon, country="IT"){
   const primary=lanes.slice(0,5);
   const secondary=lanes.slice(5,10);
   const q1=marketplaceQuery(primary[0]||'',intent,kind);
+  // One provider request per lane, not one request per marketplace. This is
+  // substantially faster and avoids exhausting Tavily/fallback providers.
   const runLanes=async hosts=>{
-    const settled=await Promise.allSettled(hosts.map(host=>exactWebSearch(marketplaceQuery(host,intent,kind),intent,[host])));
-    return dedupe(settled.flatMap(x=>x.status==='fulfilled'?(x.value?.results||[]):[]));
+    if(!hosts.length) return [];
+    const domains=[...new Set(hosts.map(h=>String(h).split('/')[0].replace(/^www\./,'')).filter(Boolean))];
+    const query=marketplaceQuery(hosts[0],intent,kind);
+    const r=await exactWebSearch(query,intent,domains);
+    return dedupe(r.results||[]);
   };
 
   let found=await runLanes(primary);
@@ -1440,6 +1445,14 @@ async function parseHtmlSearchResults(html, engine, intent){
   const push=(href,title,desc='')=>{
     try{ href=decodeURIComponent(String(href||'').replace(/&amp;/g,'&')); }catch{}
     if(href.startsWith('//')) href='https:'+href;
+    // Search engines often wrap the real destination in a redirect URL.
+    // Unwrap it before URL validation so fallback providers can still return
+    // individual marketplace listings.
+    try {
+      const hu=new URL(href, 'https://search.example');
+      const wrapped=hu.searchParams.get('uddg') || hu.searchParams.get('url') || hu.searchParams.get('u');
+      if(wrapped && /^https?:\/\//i.test(wrapped)) href=decodeURIComponent(wrapped);
+    } catch {}
     if(!/^https?:\/\//i.test(href)) return;
     if(/^(https?:\/\/)?(www\.)?(google|bing|duckduckgo|search\.brave)\./i.test(href)) return;
     const cleanTitle=clean(String(title||'').replace(/<[^>]+>/g,' '));
@@ -1449,7 +1462,7 @@ async function parseHtmlSearchResults(html, engine, intent){
   };
   let m;
   // DDG HTML: capture the whole anchor regardless of attribute order.
-  const anchors=/<a\b[^>]*class=["'][^"']*(?:result__a|result-link)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const anchors=/<a\b[^>]*class=["'][^"']*(?:result__a|result-link|result-header|result-title|snippet-title)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
   while((m=anchors.exec(html)) && results.length<15){
     const block=m[0]; const hm=block.match(/href=["']([^"']+)["']/i); if(!hm) continue;
     const tail=html.slice(m.index+m[0].length,m.index+m[0].length+1800); push(hm[1],m[1],tail);
